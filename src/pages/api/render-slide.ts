@@ -13,7 +13,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     }
 
     const browser = await puppeteer.launch({
-      headless: 'new', // puppeteer v20以降推奨設定
+      headless: 'true', // puppeteer v20以降推奨設定
       args: ['--no-sandbox', '--disable-setuid-sandbox'],
     });
 
