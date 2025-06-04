@@ -18,7 +18,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     });
 
     const page = await browser.newPage();
-    await page.setViewport({ width: 1080, height: 1920 });
+    await page.setViewport({ width: 1920, height: 1080 }); // 横長に変更
     await page.setContent(html, { waitUntil: 'networkidle0' });
 
     const imageBuffer = await page.screenshot({ type: 'png' }); // Uint8Array でOK
