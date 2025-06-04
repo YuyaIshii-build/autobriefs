@@ -23,10 +23,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     await page.setContent(html, { waitUntil: 'networkidle0' });
 
-    const imageBuffer = await page.screenshot({
-      type: 'png',
-      fullPage: false, // スライドの場合 false の方が期待に近いことが多い
-    });
+    const imageBuffer: Buffer = await page.screenshot({ type: 'png' });
 
     await browser.close();
 
