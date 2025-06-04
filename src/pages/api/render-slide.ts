@@ -5,7 +5,7 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
-    const { html } = req.body;
+    const { html } = req.body as { html: string };
 
     if (!html || typeof html !== 'string') {
       console.error('Invalid or missing HTML:', html);
