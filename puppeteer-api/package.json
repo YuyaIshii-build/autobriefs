@@ -1,0 +1,20 @@
+{
+  "name": "puppeteer-api",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "scripts": {
+    "start": "node index.js",
+    "postinstall": "puppeteer install"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "puppeteer": "^24.10.0"
+  }
+}
