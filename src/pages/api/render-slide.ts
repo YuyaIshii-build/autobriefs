@@ -5,7 +5,7 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
-    const { html } = req.body as { html: string };
+    const { html } = req.body as { html?: string };
 
     if (!html || typeof html !== 'string') {
       console.error('Invalid or missing HTML:', html);
@@ -13,24 +13,22 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     }
 
     const browser = await puppeteer.launch({
-      headless: true, // puppeteer v20以降推奨設定
+      headless: true,
       args: ['--no-sandbox', '--disable-setuid-sandbox'],
     });
 
     const page = await browser.newPage();
-
     await page.setViewport({ width: 1080, height: 1920 });
-
     await page.setContent(html, { waitUntil: 'networkidle0' });
 
-    const imageBuffer: Buffer = await page.screenshot({ type: 'png' });
-
+    const imageBuffer = await page.screenshot({ type: 'png' }); // Uint8Array でOK
     await browser.close();
 
     res.setHeader('Content-Type', 'image/png');
     res.status(200).send(imageBuffer);
-  } catch (error: any) {
-    console.error('Rendering failed:', error.message || error);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('Rendering failed:', message);
     res.status(500).json({ error: 'Internal Server Error' });
   }
 }
