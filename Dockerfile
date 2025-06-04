@@ -44,3 +44,6 @@ EXPOSE 3000
 
 # 9. 起動コマンド（Next.js 本番起動）
 CMD ["npm", "run", "start"]
+
+# 10. 日本語フォント追加
+RUN apt-get update && apt-get install -y fonts-noto-cjk
