@@ -2,7 +2,11 @@
 
 import { useState } from 'react';
 
-export default function NewsInputForm() {
+type NewsInputFormProps = {
+  onSubmit: (topic: string) => Promise<string>;
+};
+
+export default function NewsInputForm({ onSubmit }: NewsInputFormProps) {
   const [topic, setTopic] = useState('');
   const [response, setResponse] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -13,16 +17,8 @@ export default function NewsInputForm() {
     setResponse(null);
 
     try {
-      const res = await fetch('https://primary-production-a9ff9.up.railway.app/webhook/generate-intro', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ topic }),
-      });
-
-      const data = await res.json();
-      setResponse(data.script);
+      const result = await onSubmit(topic);
+      setResponse(result);
     } catch (error) {
       console.error('Error:', error);
       setResponse('エラーが発生しました。');
