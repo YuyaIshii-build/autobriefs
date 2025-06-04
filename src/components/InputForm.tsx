@@ -2,29 +2,16 @@
 
 import { useState } from 'react';
 
-type NewsInputFormProps = {
-  onSubmit: (topic: string) => Promise<string>;
+type Props = {
+  onSubmit: (text: string) => void;
 };
 
-export default function NewsInputForm({ onSubmit }: NewsInputFormProps) {
+export default function InputForm({ onSubmit }: Props) {
   const [topic, setTopic] = useState('');
-  const [response, setResponse] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    setLoading(true);
-    setResponse(null);
-
-    try {
-      const result = await onSubmit(topic);
-      setResponse(result);
-    } catch (error) {
-      console.error('Error:', error);
-      setResponse('エラーが発生しました。');
-    } finally {
-      setLoading(false);
-    }
+    onSubmit(topic);
   };
 
   return (
@@ -39,17 +26,10 @@ export default function NewsInputForm({ onSubmit }: NewsInputFormProps) {
       />
       <button
         type="submit"
-        disabled={loading}
         className="px-4 py-2 bg-blue-600 text-white rounded disabled:opacity-50"
       >
-        {loading ? '生成中...' : '台本を生成'}
+        台本を生成
       </button>
-
-      {response && (
-        <div className="mt-4 p-4 border rounded bg-gray-50 whitespace-pre-wrap">
-          {response}
-        </div>
-      )}
     </form>
   );
 }
