@@ -36,8 +36,11 @@ RUN npm install
 # 6. アプリのコードをコピー
 COPY . .
 
-# 7. ポート開放（任意）
+# ✅ 7. Next.jsのビルドを追加（←これが重要）
+RUN npm run build
+
+# 8. ポート開放（任意）
 EXPOSE 3000
 
-# 8. 起動コマンド（Next.js の dev or build/start に応じて）
+# 9. 起動コマンド（Next.js 本番起動）
 CMD ["npm", "run", "start"]
