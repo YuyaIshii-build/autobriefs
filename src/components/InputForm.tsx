@@ -3,15 +3,20 @@
 import { useState } from 'react';
 
 type Props = {
-  onSubmit: (text: string) => void;
+  onSubmit: (topic: string, videoId: string) => void;
 };
 
 export default function InputForm({ onSubmit }: Props) {
   const [topic, setTopic] = useState('');
+  const [videoId, setVideoId] = useState('');
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    onSubmit(topic);
+    if (!videoId.trim()) {
+      alert('videoId を入力してください');
+      return;
+    }
+    onSubmit(topic, videoId);
   };
 
   return (
@@ -24,6 +29,16 @@ export default function InputForm({ onSubmit }: Props) {
         rows={5}
         required
       />
+
+      <input
+        type="text"
+        placeholder="videoId（例: nintendo-20240605）"
+        value={videoId}
+        onChange={(e) => setVideoId(e.target.value)}
+        className="w-full p-2 border rounded"
+        required
+      />
+
       <button
         type="submit"
         className="px-4 py-2 bg-blue-600 text-white rounded disabled:opacity-50"

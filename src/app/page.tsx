@@ -3,9 +3,11 @@
 import InputForm from '../components/InputForm';
 
 export default function Home() {
-  const handleNewsSubmit = (text: string) => {
-    console.log('入力されたニュース記事:', text);
-    // 今後ここでn8n呼び出しや台本生成に進む
+  const handleNewsSubmit = (topic: string, videoId: string) => {
+    console.log('入力されたトピック:', topic);
+    console.log('指定された videoId:', videoId);
+
+    // ★ このあと fetch で n8n に送信できる
   };
 
   return (
