@@ -2,7 +2,7 @@
 
 import InputForm from '../components/InputForm';
 
-export default function Home(): JSX.Element {
+export default function Home() {
   const handleNewsSubmit = async (topic: string, videoId: string) => {
     console.log('入力されたトピック:', topic);
     console.log('指定された videoId:', videoId);
