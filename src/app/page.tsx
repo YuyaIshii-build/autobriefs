@@ -3,11 +3,30 @@
 import InputForm from '../components/InputForm';
 
 export default function Home() {
-  const handleNewsSubmit = (topic: string, videoId: string) => {
+  const handleNewsSubmit = async (topic: string, videoId: string) => {
     console.log('入力されたトピック:', topic);
     console.log('指定された videoId:', videoId);
 
-    // ★ このあと fetch で n8n に送信できる
+    try {
+      const response = await fetch('https://primary-production-a9ff9.up.railway.app/webhook/generate-intro', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          videoId,
+          topic,
+          source: 'ニュースソース（任意固定値）' // 後でUIから受け取るよう拡張可能
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error('生成に失敗しました');
+      }
+
+      const data = await response.json();
+      console.log('n8nからのレスポンス:', data);
+    } catch (err) {
+      console.error('エラー:', err);
+    }
   };
 
   return (
@@ -16,4 +35,4 @@ export default function Home() {
       <InputForm onSubmit={handleNewsSubmit} />
     </main>
   );
-}
+}}

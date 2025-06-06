@@ -47,3 +47,6 @@ CMD ["npm", "run", "start"]
 
 # 10. 日本語フォント追加
 RUN apt-get update && apt-get install -y fonts-noto-cjk
+
+# 11. ffmpeg追加
+RUN apt-get update && apt-get install -y ffmpeg
