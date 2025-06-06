@@ -2,7 +2,7 @@
 
 import InputForm from '../components/InputForm';
 
-export default function Home() {
+export default function Home(): JSX.Element {
   const handleNewsSubmit = async (topic: string, videoId: string) => {
     console.log('入力されたトピック:', topic);
     console.log('指定された videoId:', videoId);
@@ -14,7 +14,7 @@ export default function Home() {
         body: JSON.stringify({
           videoId,
           topic,
-          source: 'ニュースソース（任意固定値）' // 後でUIから受け取るよう拡張可能
+          source: 'ニュースソース（任意固定値）'
         }),
       });
 
@@ -35,4 +35,4 @@ export default function Home() {
       <InputForm onSubmit={handleNewsSubmit} />
     </main>
   );
-}}
+}
