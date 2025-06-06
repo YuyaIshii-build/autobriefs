@@ -13,9 +13,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(405).json({ error: 'Method not allowed' });
     }
 
-    const { slideUrl, audioUrl, outputFileName } = req.body;
-    if (!slideUrl || !audioUrl) {
-      return res.status(400).json({ error: 'Missing slideUrl or audioUrl in request body' });
+    const { slideUrl, audioUrl, outputFileName, duration } = req.body;
+    if (!slideUrl || !audioUrl || !duration) {
+      return res.status(400).json({ error: 'Missing slideUrl, audioUrl or duration in request body' });
     }
 
     // 保存先パスを決定
