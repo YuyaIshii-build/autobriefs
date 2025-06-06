@@ -1,12 +1,12 @@
-// pages/api/ generate-video.ts
+// pages/api/generate-video.ts
 
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { exec as execCb } from 'child_process';
+import { exec } from 'child_process';
 import path from 'path';
 import fs from 'fs/promises';
 import util from 'util';
 
-const exec = util.promisify(execCb);
+const execPromise = util.promisify(exec);
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
@@ -15,42 +15,49 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(405).json({ error: 'Method not allowed' });
     }
 
-    const { slideUrl, audioUrl, outputFileName } = req.body;
+    const { slideUrl, audioUrl, outputFileName, duration } = req.body;
 
-    if (!slideUrl || !audioUrl) {
-      return res.status(400).json({ error: 'Missing slideUrl or audioUrl in request body' });
+    if (!slideUrl || !audioUrl || !duration) {
+      return res.status(400).json({ error: 'Missing slideUrl, audioUrl or duration in request body' });
     }
 
-    const outputName = outputFileName || 'output.mp4';
+    // 出力ファイル名（なければ固定）
+    const outputName = outputFileName ? outputFileName : 'output.mp4';
+    // 一時保存先は /tmp 配下（環境による）
     const outputPath = path.join('/tmp', outputName);
 
-    // 1. ffprobeで音声の長さを取得
-    const durationCmd = `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${audioUrl}"`;
-    const { stdout: durationStr } = await exec(durationCmd);
-    const duration = parseFloat(durationStr.trim());
+    // 音声の長さに余裕を持たせる（3秒バッファ）
+    const bufferSeconds = 3;
+    const safeDuration = Number(duration) + bufferSeconds;
 
-    if (isNaN(duration)) {
-      return res.status(500).json({ error: 'Failed to get audio duration' });
+    // ffmpegコマンド構築（-shortest は外し -t で制御）
+    const cmd = `ffmpeg -y -loop 1 -i "${slideUrl}" -i "${audioUrl}" -c:v libx264 -t ${safeDuration} -pix_fmt yuv420p -c:a aac -b:a 192k "${outputPath}"`;
+
+    try {
+      // コマンド実行
+      const { stdout, stderr } = await execPromise(cmd);
+
+      // 生成された動画を読み込んでBase64に変換
+      const videoBuffer = await fs.readFile(outputPath);
+      const videoBase64 = videoBuffer.toString('base64');
+
+      // 一時ファイル削除
+      await fs.unlink(outputPath);
+
+      // 成功レスポンス返却
+      res.status(200).json({
+        message: 'Video generated successfully',
+        outputFileName: outputName,
+        videoBase64,
+        ffmpegStdout: stdout,
+        ffmpegStderr: stderr,
+      });
+    } catch (ffmpegError) {
+      console.error('ffmpeg execution failed:', ffmpegError);
+      return res.status(500).json({ error: 'ffmpeg execution failed', details: ffmpegError });
     }
-
-    // 2. 画像を音声の長さだけループさせて動画作成
-    const ffmpegCmd = `ffmpeg -y -loop 1 -i "${slideUrl}" -i "${audioUrl}" -c:v libx264 -t ${duration} -pix_fmt yuv420p -c:a aac -b:a 192k -shortest "${outputPath}"`;
-    await exec(ffmpegCmd);
-
-    // 3. 生成ファイルをBase64変換してレスポンス
-    const videoBuffer = await fs.readFile(outputPath);
-    const videoBase64 = videoBuffer.toString('base64');
-
-    await fs.unlink(outputPath);
-
-    res.status(200).json({
-      message: 'Video generated successfully',
-      outputFileName: outputName,
-      videoBase64,
-    });
-
   } catch (err) {
     console.error('Unexpected error:', err);
-    res.status(500).json({ error: 'Unexpected error', details: err instanceof Error ? err.message : String(err) });
+    res.status(500).json({ error: 'Unexpected error' });
   }
 }
