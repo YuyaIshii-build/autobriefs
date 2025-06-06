@@ -38,7 +38,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     // 3. ffmpeg コマンドを実行
     // 画像をループして音声と合わせ、音声の長さに動画を合わせる
-    const cmd = `ffmpeg -y -loop 1 -i "${slidePath}" -i "${audioPath}" -c:v libx264 -c:a aac -b:a 192k -shortest "${outputPath}"`;
+    const cmd = `ffmpeg -y -loop 1 -i "${slideUrl}" -i "${audioUrl}" -c:v libx264 -c:a aac -b:a 192k -t ${duration} "${outputPath}"`;
 
     exec(cmd, async (error, stdout, stderr) => {
       if (error) {
