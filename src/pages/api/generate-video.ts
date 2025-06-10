@@ -5,7 +5,7 @@ import { exec } from 'child_process';
 import util from 'util';
 import path from 'path';
 import fs from 'fs/promises';
-import fetch from 'node-fetch'; // node18以降はglobal fetchがあるので不要なら省略可
+import fetch from 'node-fetch';
 
 const execAsync = util.promisify(exec);
 
@@ -16,16 +16,16 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(405).json({ error: 'Method not allowed' });
     }
 
-    const { slideUrl, audioUrl, subtitleUrl, outputFileName } = req.body;
+    const { slideUrl, audioUrl, subtitleUrl, videoId, segmentId, outputFileName } = req.body;
 
-    if (!slideUrl || !audioUrl || !subtitleUrl) {
-      return res.status(400).json({ error: 'Missing slideUrl, audioUrl, or subtitleUrl in request body' });
+    if (!slideUrl || !audioUrl || !videoId || !segmentId) {
+      return res.status(400).json({ error: 'Missing required parameters (slideUrl, audioUrl, videoId, segmentId)' });
     }
 
-    const slidePath = path.join('/tmp', 'slide.png');
-    const audioPath = path.join('/tmp', 'audio.mp3');
-    const subtitlePath = path.join('/tmp', 'subtitle.srt');
-    const outputName = outputFileName || 'output.mp4';
+    const slidePath = path.join('/tmp', `${videoId}_${segmentId}_slide.png`);
+    const audioPath = path.join('/tmp', `${videoId}_${segmentId}_audio.mp3`);
+    const subtitlePath = subtitleUrl ? path.join('/tmp', `${videoId}_${segmentId}_subtitle.srt`) : null;
+    const outputName = outputFileName || `${videoId}_${segmentId}.mp4`;
     const outputPath = path.join('/tmp', outputName);
 
     // 1. スライド画像をダウンロードして保存
@@ -40,11 +40,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const audioBuffer = await audioRes.arrayBuffer();
     await fs.writeFile(audioPath, Buffer.from(audioBuffer));
 
-    // 3. 字幕ファイルをダウンロードして保存
-    const subtitleRes = await fetch(subtitleUrl);
-    if (!subtitleRes.ok) throw new Error('Failed to fetch subtitle file');
-    const subtitleText = await subtitleRes.text();
-    await fs.writeFile(subtitlePath, subtitleText, 'utf-8');
+    // 3. 字幕ファイルをダウンロードして保存（あれば）
+    if (subtitleUrl && subtitlePath) {
+      const subtitleRes = await fetch(subtitleUrl);
+      if (!subtitleRes.ok) throw new Error('Failed to fetch subtitle file');
+      const subtitleText = await subtitleRes.text();
+      await fs.writeFile(subtitlePath, subtitleText, 'utf-8');
+    }
 
     // 4. ffprobeで音声の長さを取得
     const { stdout: durationStdout } = await execAsync(`ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${audioPath}"`);
@@ -53,37 +55,32 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       throw new Error('Failed to parse audio duration');
     }
 
-    // 5. ffmpegコマンドを構築・実行
-    const cmd = `ffmpeg -y -loop 1 -i "${slidePath}" -i "${audioPath}" -c:v libx264 -c:a aac -b:a 192k -t ${duration} -vf subtitles="${subtitlePath}" "${outputPath}"`;
+    // 5. ffmpegコマンドを構築
+    let cmd = `ffmpeg -y -loop 1 -i "${slidePath}" -i "${audioPath}" -c:v libx264 -c:a aac -b:a 192k -t ${duration}`;
 
-    exec(cmd, async (error, stdout, stderr) => {
-      if (error) {
-        console.error('ffmpeg error:', error, stderr);
-        return res.status(500).json({ error: 'ffmpeg execution failed', details: stderr });
-      }
+    if (subtitlePath) {
+      cmd += ` -vf subtitles="${subtitlePath}"`;
+    }
 
-      try {
-        // 6. 生成された動画を読み込みBase64化（必要に応じて）
-        const videoBuffer = await fs.readFile(outputPath);
+    cmd += ` "${outputPath}"`;
 
-        // 7. 一時ファイル削除
-        await Promise.all([
-          fs.unlink(slidePath),
-          fs.unlink(audioPath),
-          fs.unlink(subtitlePath),
-          fs.unlink(outputPath),
-        ]);
+    // 6. ffmpeg実行
+    await execAsync(cmd);
 
-        // 8. 成功レスポンス
-        res.status(200).json({
-          message: 'Video generated successfully',
-          outputFileName: outputName,
-          videoBase64: videoBuffer.toString('base64'),
-        });
-      } catch (readErr) {
-        console.error('Error reading output file:', readErr);
-        res.status(500).json({ error: 'Failed to read output video file' });
-      }
+    // 7. 一時的な素材ファイル（スライド、音声、字幕）を削除
+    await Promise.all([
+      fs.unlink(slidePath).catch(() => {}),
+      fs.unlink(audioPath).catch(() => {}),
+      subtitlePath ? fs.unlink(subtitlePath).catch(() => {}) : Promise.resolve(),
+    ]);
+    
+    // 8. 成功レスポンス（動画ファイルのパスまたは名前を返す）
+    res.status(200).json({
+      message: 'Segment video generated and saved',
+      outputFileName: outputName,
+      outputPath,
+      videoId,
+      segmentId,
     });
 
   } catch (err) {
