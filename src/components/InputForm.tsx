@@ -3,20 +3,39 @@
 import { useState } from 'react';
 
 type Props = {
-  onSubmit: (topic: string, videoId: string) => void;
+  onSubmit: (topic: string, videoId: string) => Promise<void> | void;
 };
 
 export default function InputForm({ onSubmit }: Props) {
   const [topic, setTopic] = useState('');
-  const [videoId, setVideoId] = useState('');
+  const [loading, setLoading] = useState(false);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const generateTimestamp = () => {
+    const now = new Date();
+    const pad = (n: number) => n.toString().padStart(2, '0');
+    const year = now.getFullYear();
+    const month = pad(now.getMonth() + 1);
+    const day = pad(now.getDate());
+    const hour = pad(now.getHours());
+    const minute = pad(now.getMinutes());
+    return `${year}${month}${day}${hour}${minute}`;
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!videoId.trim()) {
-      alert('videoId を入力してください');
+    if (!topic.trim()) {
+      alert('ニュース記事やトピックを入力してください');
       return;
     }
-    onSubmit(topic, videoId);
+
+    setLoading(true);
+    const videoId = generateTimestamp();
+
+    try {
+      await onSubmit(topic, videoId);
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -28,23 +47,15 @@ export default function InputForm({ onSubmit }: Props) {
         className="w-full p-2 border rounded"
         rows={5}
         required
+        disabled={loading}
       />
-
-      <input
-        type="text"
-        placeholder="videoId（例: nintendo-20240605）"
-        value={videoId}
-        onChange={(e) => setVideoId(e.target.value)}
-        className="w-full p-2 border rounded"
-        required
-      />
-
 
       <button
         type="submit"
-        className="px-4 py-2 bg-blue-600 text-white rounded disabled:opacity-50"
+        disabled={loading}
+        className={`px-4 py-2 rounded text-white ${loading ? 'bg-gray-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'}`}
       >
-        台本を生成
+        {loading ? '生成中' : '動画生成'}
       </button>
     </form>
   );
