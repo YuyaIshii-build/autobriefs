@@ -36,16 +36,18 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(400).json({ error: 'No video segment files found for this videoId' });
     }
 
-    // 2. concat用テキストファイル作成
+    // 2. concat用テキストファイル作成（ファイル名のみを記載）
     const concatListPath = path.join(tmpDir, `${videoId}_concat_list.txt`);
-    const concatFileContent = videoFiles.map(f => `file '${f}'`).join('\n');
+    const concatFileContent = videoFiles
+      .map(f => `file '${path.basename(f)}'`)
+      .join('\n');
     await fs.writeFile(concatListPath, concatFileContent);
 
-    // 3. ffmpegで連結
+    // 3. ffmpegで連結（cwd指定で作業ディレクトリを/tmpに設定）
     const outputFileName = `${videoId}.mp4`;
     const outputPath = path.join(tmpDir, outputFileName);
-    const ffmpegCmd = `ffmpeg -y -f concat -safe 0 -i "${concatListPath}" -c copy "${outputPath}"`;
-    const { stdout, stderr } = await execAsync(ffmpegCmd);
+    const ffmpegCmd = `ffmpeg -y -f concat -safe 0 -i "${concatListPath}" -c copy "${outputFileName}"`;
+    const { stdout, stderr } = await execAsync(ffmpegCmd, { cwd: tmpDir });
 
     // 4. Supabaseに最終動画ファイルをアップロード
     const videoBuffer = await fs.readFile(outputPath);
