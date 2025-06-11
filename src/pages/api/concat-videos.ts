@@ -42,6 +42,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       .map(f => `file '${path.basename(f)}'`)
       .join('\n');
     await fs.writeFile(concatListPath, concatFileContent);
+    console.log('concat list content:\n', concatFileContent);
 
     // 3. ffmpegで連結（cwd指定で作業ディレクトリを/tmpに設定）
     const outputFileName = `${videoId}.mp4`;
