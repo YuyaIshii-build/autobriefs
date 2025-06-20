@@ -53,7 +53,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(500).json({ error: 'Failed to upload slide.png', details: uploadError.message });
     }
 
-    return res.status(200).json({ message: 'slide.png uploaded successfully', path: filePath });
+    return res.status(200).json({
+      message: 'slide.png uploaded successfully',
+      path: filePath,
+      videoId,
+      segmentId,
+    });
+
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error('Rendering failed:', message);
