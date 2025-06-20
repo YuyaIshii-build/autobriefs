@@ -92,7 +92,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       ]);
 
       // ✅ Supabase Storage に done.txt をアップロード（セグメント完了通知）
-      const donePath = `projects/${videoId}/${segmentId}/done.txt`;
+      const donePath = `${videoId}/${segmentId}/done.txt`;
       const { error: uploadError } = await supabase.storage
         .from('projects')
         .upload(donePath, Buffer.from('done'), {
