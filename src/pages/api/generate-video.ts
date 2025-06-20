@@ -9,11 +9,6 @@ import fetch from 'node-fetch';
 
 const execAsync = util.promisify(exec);
 
-// Supabase設定（必要に応じて環境変数に置き換えてください）
-const SUPABASE_STORAGE_BUCKET = 'public'; // 例: 'public'
-const SUPABASE_PROJECT_URL = 'https://your-project.supabase.co'; // 自分のURLに変更
-const SUPABASE_SERVICE_ROLE_KEY = 'your-service-role-key'; // 環境変数に移すのが推奨
-
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'POST') {
     res.setHeader('Allow', 'POST');
@@ -89,26 +84,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         fs.unlink(audioPath).catch(() => {}),
         subtitlePath ? fs.unlink(subtitlePath).catch(() => {}) : Promise.resolve(),
       ]);
-
-      // ✅ Supabase Storage に done.txt をアップロード（セグメント完了通知）
-      const doneUrl = `${SUPABASE_PROJECT_URL}/storage/v1/object/${SUPABASE_STORAGE_BUCKET}/videos/${videoId}/${segmentId}/done.txt`;
-
-      const uploadRes = await fetch(doneUrl, {
-        method: 'PUT',
-        headers: {
-          'Authorization': `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-          'Content-Type': 'text/plain',
-          'Cache-Control': 'no-cache',
-        },
-        body: 'done',
-      });
-
-      if (!uploadRes.ok) {
-        const errorText = await uploadRes.text();
-        throw new Error(`Failed to upload done.txt: ${uploadRes.status} ${errorText}`);
-      }
-
-      console.log(`[generate-video] done.txt uploaded to Supabase for videoId=${videoId}, segmentId=${segmentId}`);
     } catch (err) {
       console.error('[generate-video] Async process failed:', err);
     }
