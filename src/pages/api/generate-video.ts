@@ -84,6 +84,21 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         fs.unlink(audioPath).catch(() => {}),
         subtitlePath ? fs.unlink(subtitlePath).catch(() => {}) : Promise.resolve(),
       ]);
+
+      // 🔔 セグメント生成完了通知 (n8n Webhook 呼び出し)
+      await fetch('https://primary-production-a9ff9.up.railway.app/webhook/segment-done', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          videoId,
+          segmentId,
+          status: 'done',
+        }),
+      });
+
+      console.log(`[generate-video] Callback sent for videoId=${videoId}, segmentId=${segmentId}`);
     } catch (err) {
       console.error('[generate-video] Async process failed:', err);
     }
