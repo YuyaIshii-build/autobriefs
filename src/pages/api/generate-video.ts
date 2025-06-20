@@ -6,14 +6,14 @@ import util from 'util';
 import path from 'path';
 import fs from 'fs/promises';
 import fetch from 'node-fetch';
+import { createClient } from '@supabase/supabase-js';
 
 const execAsync = util.promisify(exec);
 
-// Supabase設定（必要に応じて環境変数に置き換えてください）
-
-const SUPABASE_STORAGE_BUCKET = 'public'; // 例: 'public'
-const SUPABASE_PROJECT_URL = 'https://dqeonmqfumkblxintbbz.supabase.co'; // 自分のURLに変更
-const SUPABASE_SERVICE_ROLE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRxZW9ubXFmdW1rYmx4aW50YmJ6Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc0OTEzMTMyNCwiZXhwIjoyMDY0NzA3MzI0fQ.8OckRV5MJNvNWDox_N225S7R3-LQA0P88_aSzAL1RYY'; // 環境変数に移すのが推奨
+// Supabase設定（.envから取得推奨）
+const SUPABASE_URL = process.env.SUPABASE_URL!;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'POST') {
@@ -92,23 +92,20 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       ]);
 
       // ✅ Supabase Storage に done.txt をアップロード（セグメント完了通知）
-      const doneUrl = `${SUPABASE_PROJECT_URL}/storage/v1/object/${SUPABASE_STORAGE_BUCKET}/projects/${videoId}/${segmentId}/done.txt`;
+      const donePath = `projects/${videoId}/${segmentId}/done.txt`;
+      const { error: uploadError } = await supabase.storage
+        .from('projects')
+        .upload(donePath, Buffer.from('done'), {
+          upsert: true,
+          contentType: 'text/plain',
+          cacheControl: 'no-cache',
+        });
 
-      const uploadRes = await fetch(doneUrl, {
-        method: 'PUT',
-        headers: {
-          'Authorization': `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-          'Content-Type': 'text/plain',
-          'Cache-Control': 'no-cache',
-        },
-        body: 'done',
-      });
-
-      if (!uploadRes.ok) {
-        const errorText = await uploadRes.text();
-        throw new Error(`Failed to upload done.txt: ${uploadRes.status} ${errorText}`);
+      if (uploadError) {
+        throw new Error(`Failed to upload done.txt to Supabase: ${uploadError.message}`);
       }
 
+      console.log(`[generate-video] done.txt uploaded to Supabase at: ${donePath}`);
       console.log(`[generate-video] done.txt uploaded to Supabase for videoId=${videoId}, segmentId=${segmentId}`);
     } catch (err) {
       console.error('[generate-video] Async process failed:', err);
