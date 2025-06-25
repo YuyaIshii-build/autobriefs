@@ -35,7 +35,7 @@ export default function ConversationNewsPage() {
       <form onSubmit={handleSubmit}>
         <textarea
           className="w-full border p-2 h-48"
-          placeholder="英語ニュース記事をペーストしてください"
+          placeholder="ニュース記事をペーストしてください"
           value={input}
           onChange={(e) => setInput(e.target.value)}
         />

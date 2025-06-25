@@ -43,7 +43,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         await page.setViewport({ width: 1920, height: 1080 });
         await page.setContent(html, { waitUntil: 'networkidle0' });
 
-        const imageBuffer = await page.screenshot({ type: 'png' });
+        // ✅ ここを修正：omitBackground: true を追加して背景透過に対応
+        const imageBuffer = await page.screenshot({
+          type: 'png',
+          omitBackground: true,
+        });
+
         await browser.close();
 
         const filePath = `${videoId}/${segmentId}/slide.png`;
