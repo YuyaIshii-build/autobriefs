@@ -25,7 +25,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(400).json({ error: 'Missing required parameters (videoId, segmentId, speaker)' });
   }
 
-  // 動的URL
+  // 動的URL生成
   const basePath = `https://dqeonmqfumkblxintbbz.supabase.co/storage/v1/object/public/projects/${videoId}/${segmentId}`;
   const audioUrl = `${basePath}/audio.mp3`;
   const slideUrl = `${basePath}/slide.png`;
@@ -49,7 +49,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       const templatePath = `${tmpBase}_template.mp4`;
       const outputPath = `${tmpBase}_segment.mp4`;
 
-      // 各素材をダウンロード
+      // 素材をダウンロード
       const download = async (url: string, filePath: string) => {
         const res = await fetch(url);
         if (!res.ok) throw new Error(`Failed to download ${url}`);
@@ -63,21 +63,21 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         download(templateUrl, templatePath),
       ]);
 
-      // duration取得
+      // 音声のdurationを取得
       const { stdout: durationOut } = await execAsync(
         `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${audioPath}"`
       );
       const duration = parseFloat(durationOut.trim());
       if (isNaN(duration)) throw new Error('Invalid audio duration');
 
-      // ffmpeg合成コマンド
+      // 安定化したffmpegコマンド（overlayしてmapを固定）
       const cmd = `
         ffmpeg -y \
         -i "${templatePath}" \
         -i "${slidePath}" \
         -i "${audioPath}" \
-        -filter_complex "[0:v][1:v] overlay=0:0:enable='between(t,0,${duration})'[v]" \
-        -map "[v]" -map 2:a \
+        -filter_complex "[0:v][1:v] overlay=0:0:enable='between(t,0,${duration})'" \
+        -map 0:v -map 2:a \
         -c:v libx264 -preset veryfast -c:a aac -shortest -t ${duration} "${outputPath}"
       `;
 
