@@ -49,7 +49,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       const templatePath = `/tmp/loop_${speaker.toLowerCase()}.mp4`;
       const outputPath = `/tmp/${videoId}_${segmentId}.mp4`;
 
-      // ダウンロード関数
       const download = async (url: string, filePath: string) => {
         const res = await fetch(url);
         if (!res.ok) throw new Error(`Failed to download ${url}`);
@@ -57,13 +56,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         await fs.writeFile(filePath, Buffer.from(buffer));
       };
 
-      // audio, slide を毎回ダウンロード
       await Promise.all([
         download(audioUrl, audioPath),
         download(slideUrl, slidePath),
       ]);
 
-      // template はローカルにあればスキップ
       if (!fsSync.existsSync(templatePath)) {
         console.log(`[generate-convo-video] Downloading template for ${speaker}`);
         await download(templateUrl, templatePath);
@@ -71,14 +68,14 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         console.log(`[generate-convo-video] Using cached template for ${speaker}`);
       }
 
-      // duration取得
+      // duration取得（小数第3位に丸め）
       const { stdout: durationOut } = await execAsync(
         `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${audioPath}"`
       );
-      const duration = parseFloat(durationOut.trim());
+      const rawDuration = parseFloat(durationOut.trim());
+      const duration = Math.round(rawDuration * 1000) / 1000;
       if (isNaN(duration)) throw new Error('Invalid audio duration');
 
-      // ffmpeg合成コマンド
       const cmd = `
         ffmpeg -y \
         -i "${templatePath}" \
@@ -92,7 +89,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       await execAsync(cmd);
       console.log(`[generate-convo-video] Segment video created: ${outputPath}`);
 
-      // Supabaseに done.txt アップロード
       const donePath = `${videoId}/${segmentId}/done.txt`;
       const { error: doneUploadError } = await supabase.storage
         .from('projects')
@@ -108,7 +104,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
       console.log(`[generate-convo-video] done.txt uploaded to Supabase at ${donePath}`);
 
-      // 不要ファイルをクリーンアップ（テンプレ・出力は残す）
       await Promise.all([
         fs.unlink(audioPath).catch(() => {}),
         fs.unlink(slidePath).catch(() => {}),
