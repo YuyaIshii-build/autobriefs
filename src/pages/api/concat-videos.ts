@@ -10,7 +10,7 @@ import { createClient } from '@supabase/supabase-js';
 const execAsync = util.promisify(exec);
 
 const SUPABASE_URL = process.env.SUPABASE_URL!;
-const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!; // サーバー側用キー
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -30,6 +30,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const files = await fs.readdir(tmpDir);
     const videoFiles = files
       .filter(f => f.startsWith(videoId + '_') && f.endsWith('.mp4'))
+      .sort() // セグメント順を保証
       .map(f => path.join(tmpDir, f));
 
     if (videoFiles.length === 0) {
@@ -65,11 +66,14 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(500).json({ error: 'Failed to upload final video file to Supabase', details: uploadError.message });
     }
 
-    // 5. 一時ファイルを削除（セグメント動画、concatリスト、最終動画）
+    // 5. 一時ファイルを削除（セグメント動画、concatリスト、最終動画、テンプレ動画）
+    const templatePaths = ['/tmp/loop_mia.mp4', '/tmp/loop_yu.mp4'];
+
     await Promise.all([
       ...videoFiles.map(f => fs.unlink(f).catch(() => {})),
       fs.unlink(concatListPath).catch(() => {}),
       fs.unlink(outputPath).catch(() => {}),
+      ...templatePaths.map(p => fs.unlink(p).catch(() => {})),
     ]);
 
     // 6. 成功レスポンス

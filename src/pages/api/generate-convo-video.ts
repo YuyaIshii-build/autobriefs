@@ -4,6 +4,7 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import { exec } from 'child_process';
 import util from 'util';
 import fs from 'fs/promises';
+import fsSync from 'fs'; // for sync access check
 import fetch from 'node-fetch';
 import { createClient } from '@supabase/supabase-js';
 
@@ -25,7 +26,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(400).json({ error: 'Missing required parameters (videoId, segmentId, speaker)' });
   }
 
-  // 動的URL生成
   const basePath = `https://dqeonmqfumkblxintbbz.supabase.co/storage/v1/object/public/projects/${videoId}/${segmentId}`;
   const audioUrl = `${basePath}/audio.mp3`;
   const slideUrl = `${basePath}/slide.png`;
@@ -46,10 +46,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       const tmpBase = `/tmp/${videoId}_${segmentId}`;
       const audioPath = `${tmpBase}_audio.mp3`;
       const slidePath = `${tmpBase}_slide.png`;
-      const templatePath = `${tmpBase}_template.mp4`;
-      const outputPath = `${tmpBase}_segment.mp4`;
+      const templatePath = `/tmp/loop_${speaker.toLowerCase()}.mp4`;
+      const outputPath = `/tmp/${videoId}_${segmentId}.mp4`;
 
-      // 素材をダウンロード
+      // ダウンロード関数
       const download = async (url: string, filePath: string) => {
         const res = await fetch(url);
         if (!res.ok) throw new Error(`Failed to download ${url}`);
@@ -57,20 +57,28 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         await fs.writeFile(filePath, Buffer.from(buffer));
       };
 
+      // audio, slide を毎回ダウンロード
       await Promise.all([
         download(audioUrl, audioPath),
         download(slideUrl, slidePath),
-        download(templateUrl, templatePath),
       ]);
 
-      // 音声のdurationを取得
+      // template はローカルにあればスキップ
+      if (!fsSync.existsSync(templatePath)) {
+        console.log(`[generate-convo-video] Downloading template for ${speaker}`);
+        await download(templateUrl, templatePath);
+      } else {
+        console.log(`[generate-convo-video] Using cached template for ${speaker}`);
+      }
+
+      // duration取得
       const { stdout: durationOut } = await execAsync(
         `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${audioPath}"`
       );
       const duration = parseFloat(durationOut.trim());
       if (isNaN(duration)) throw new Error('Invalid audio duration');
 
-      // 安定化したffmpegコマンド（overlayしてmapを固定）
+      // ffmpeg合成コマンド
       const cmd = `
         ffmpeg -y \
         -i "${templatePath}" \
@@ -82,28 +90,28 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       `;
 
       await execAsync(cmd);
-      console.log(`[generate-convo-video] Segment created: ${outputPath}`);
+      console.log(`[generate-convo-video] Segment video created: ${outputPath}`);
 
-      // Supabaseにアップロード
-      const finalPath = `${videoId}/${segmentId}/segment.mp4`;
-      const fileBuffer = await fs.readFile(outputPath);
-      const { error: uploadError } = await supabase.storage
+      // Supabaseに done.txt アップロード
+      const donePath = `${videoId}/${segmentId}/done.txt`;
+      const { error: doneUploadError } = await supabase.storage
         .from('projects')
-        .upload(finalPath, fileBuffer, {
-          contentType: 'video/mp4',
+        .upload(donePath, Buffer.from('done'), {
           upsert: true,
-          cacheControl: '3600',
+          contentType: 'text/plain',
+          cacheControl: 'no-cache',
         });
 
-      if (uploadError) throw new Error(`Upload failed: ${uploadError.message}`);
-      console.log(`[generate-convo-video] Uploaded to Supabase: ${finalPath}`);
+      if (doneUploadError) {
+        throw new Error(`Failed to upload done.txt: ${doneUploadError.message}`);
+      }
 
-      // クリーンアップ
+      console.log(`[generate-convo-video] done.txt uploaded to Supabase at ${donePath}`);
+
+      // 不要ファイルをクリーンアップ（テンプレ・出力は残す）
       await Promise.all([
         fs.unlink(audioPath).catch(() => {}),
         fs.unlink(slidePath).catch(() => {}),
-        fs.unlink(templatePath).catch(() => {}),
-        fs.unlink(outputPath).catch(() => {}),
       ]);
     } catch (err) {
       console.error('[generate-convo-video] Processing error:', err);
