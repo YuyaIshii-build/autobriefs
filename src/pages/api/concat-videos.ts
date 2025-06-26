@@ -30,19 +30,21 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const files = await fs.readdir(tmpDir);
     const videoFiles = files
       .filter(f => f.startsWith(videoId + '_') && f.endsWith('.mp4'))
-      .sort() // セグメント順を保証
+      .filter(f => f.includes('segment_')) // segment_xxx のみ対象
+      .sort()
       .map(f => path.join(tmpDir, f));
 
     if (videoFiles.length === 0) {
       return res.status(400).json({ error: 'No video segment files found for this videoId' });
     }
 
-    // 2. concat用テキストファイル作成（ファイル名のみを記載）
+    // 2. concat用テキストファイル作成
     const concatListPath = path.join(tmpDir, `${videoId}_concat_list.txt`);
     const concatFileContent = videoFiles
       .map(f => `file '${path.basename(f)}'`)
-      .join('\n');
-    await fs.writeFile(concatListPath, concatFileContent);
+      .join('\n') + '\n'; // 最後に改行を追加
+    await fs.writeFile(concatListPath, concatFileContent.replace(/\r\n/g, '\n'), 'utf8');
+
     console.log('concat list content:\n', concatFileContent);
 
     // 3. ffmpegで連結（cwd指定で作業ディレクトリを/tmpに設定）
@@ -54,7 +56,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     // 4. Supabaseに最終動画ファイルをアップロード
     const videoBuffer = await fs.readFile(outputPath);
     const { error: uploadError } = await supabase.storage
-      .from('projects') // バケット名に応じて変更
+      .from('projects')
       .upload(`${videoId}/${outputFileName}`, videoBuffer, {
         cacheControl: '3600',
         upsert: true,
@@ -66,9 +68,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(500).json({ error: 'Failed to upload final video file to Supabase', details: uploadError.message });
     }
 
-    // 5. 一時ファイルを削除（セグメント動画、concatリスト、最終動画、テンプレ動画）
+    // 5. 一時ファイルを削除
     const templatePaths = ['/tmp/loop_mia.mp4', '/tmp/loop_yu.mp4'];
-
     await Promise.all([
       ...videoFiles.map(f => fs.unlink(f).catch(() => {})),
       fs.unlink(concatListPath).catch(() => {}),
@@ -82,7 +83,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       outputFileName,
       ffmpegStdout: stdout,
       ffmpegStderr: stderr,
-      videoUrl: `${SUPABASE_URL}/storage/v1/object/public/projects/${videoId}/${outputFileName}`, // 公開URLの例
+      videoUrl: `${SUPABASE_URL}/storage/v1/object/public/projects/${videoId}/${outputFileName}`,
     });
 
   } catch (error) {
