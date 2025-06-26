@@ -9,7 +9,7 @@ export default function ConversationNewsPage() {
   const [message, setMessage] = useState('');
   const [loading, setLoading] = useState(false);
 
-  const handleSubmit = async (text: string, videoId: string) => {
+  const handleSubmit = async (topic: string, videoId: string) => {
     setLoading(true);
     setMessage('');
 
@@ -17,7 +17,7 @@ export default function ConversationNewsPage() {
       const res = await fetch('https://primary-production-a9ff9.up.railway.app/webhook/conversation-news', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, videoId }),
+        body: JSON.stringify({ topic, videoId }), // ✅ 修正点：text → topic
       });
 
       if (res.ok) {
