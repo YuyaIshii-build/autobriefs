@@ -54,12 +54,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     for (let i = 0; i < chunks.length; i++) {
       const chunk = chunks[i];
-
-      if (chunk.length === 0) {
-        console.log(`Skipping empty chunk ${i}`);
-        continue;
-      }
-
       const chunkListPath = path.join(tmpDir, `${videoId}_chunk_${i}.txt`);
       const chunkOutput = path.join(tmpDir, `${videoId}_chunk_${i}.mp4`);
 
@@ -75,22 +69,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
       console.log(`Chunk ${i + 1} ffmpeg output:\n${chunkStdout}\n${chunkStderr}`);
 
-      // チャンク生成確認
-      try {
-        await fs.access(chunkOutput);
-      } catch {
-        throw new Error(`Chunk output file not created: ${chunkOutput}`);
-      }
-
       intermediateFiles.push(chunkOutput);
       await fs.unlink(chunkListPath).catch(() => {});
     }
 
-    if (intermediateFiles.length === 0) {
-      throw new Error('No intermediate chunk files were created.');
-    }
-
-    // 2. 最終結合
+    // 2. 最終結合（ここを再エンコードで圧縮）
     const finalListPath = path.join(tmpDir, `${videoId}_final_list.txt`);
     const finalFileContent = intermediateFiles
       .map(f => `file '${path.basename(f)}'`)
@@ -100,7 +83,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     console.log('Final concat list:\n', finalFileContent);
 
     const finalOutput = path.join(tmpDir, `${videoId}.mp4`);
-    const ffmpegFinalCmd = `ffmpeg -y -f concat -safe 0 -i "${finalListPath}" -c copy "${path.basename(finalOutput)}"`;
+
+    // ✅ 再エンコードで圧縮
+    const ffmpegFinalCmd = `ffmpeg -y -f concat -safe 0 -i "${finalListPath}" -c:v libx264 -preset slow -crf 24 -c:a aac -b:a 128k "${path.basename(finalOutput)}"`;
     const { stdout: finalStdout, stderr: finalStderr } = await execAsync(ffmpegFinalCmd, { cwd: tmpDir });
 
     console.log(`Final ffmpeg output:\n${finalStdout}\n${finalStderr}`);
@@ -132,7 +117,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     ]);
 
     res.status(200).json({
-      message: 'Videos concatenated and uploaded successfully',
+      message: 'Videos concatenated, compressed, and uploaded successfully',
       outputFileName: `${videoId}.mp4`,
       videoUrl: `${SUPABASE_URL}/storage/v1/object/public/projects/${videoId}/${videoId}.mp4`,
       ffmpegStdout: finalStdout,
