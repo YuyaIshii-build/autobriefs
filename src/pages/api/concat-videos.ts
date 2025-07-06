@@ -64,7 +64,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
       console.log(`Chunk ${i + 1}/${chunks.length} list:\n${chunkFileContent}`);
 
-      const ffmpegChunkCmd = `ffmpeg -y -f concat -safe 0 -i "${chunkListPath}" -c copy "${path.basename(chunkOutput)}"`;
+      // ✅ チャンクも再エンコード（軽めの設定）
+      const ffmpegChunkCmd = `ffmpeg -y -f concat -safe 0 -i "${chunkListPath}" \
+-c:v libx264 -preset faster -crf 28 -r 15 \
+-c:a aac -b:a 96k "${path.basename(chunkOutput)}"`;
+
       const { stdout: chunkStdout, stderr: chunkStderr } = await execAsync(ffmpegChunkCmd, { cwd: tmpDir });
 
       console.log(`Chunk ${i + 1} ffmpeg output:\n${chunkStdout}\n${chunkStderr}`);
@@ -73,7 +77,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       await fs.unlink(chunkListPath).catch(() => {});
     }
 
-    // 2. 最終結合（ここを再エンコードで圧縮）
+    // 2. 最終結合（再エンコード）
     const finalListPath = path.join(tmpDir, `${videoId}_final_list.txt`);
     const finalFileContent = intermediateFiles
       .map(f => `file '${path.basename(f)}'`)
@@ -84,8 +88,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     const finalOutput = path.join(tmpDir, `${videoId}.mp4`);
 
-    // ✅ 再エンコードで圧縮
-    const ffmpegFinalCmd = `ffmpeg -y -f concat -safe 0 -i "${finalListPath}" -c:v libx264 -preset slow -crf 24 -c:a aac -b:a 128k "${path.basename(finalOutput)}"`;
+    const ffmpegFinalCmd = `ffmpeg -y -f concat -safe 0 -i "${finalListPath}" \
+-c:v libx264 -preset faster -crf 28 -r 15 \
+-c:a aac -b:a 96k "${path.basename(finalOutput)}"`;
+
     const { stdout: finalStdout, stderr: finalStderr } = await execAsync(ffmpegFinalCmd, { cwd: tmpDir });
 
     console.log(`Final ffmpeg output:\n${finalStdout}\n${finalStderr}`);
