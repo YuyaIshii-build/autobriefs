@@ -36,14 +36,20 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       try {
         const browser = await puppeteer.launch({
           headless: true,
-          args: ['--no-sandbox', '--disable-setuid-sandbox'],
+          args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--single-process',
+            '--no-zygote',
+            `--user-data-dir=/tmp/puppeteer_user_data`,
+          ],
         });
 
         const page = await browser.newPage();
         await page.setViewport({ width: 1920, height: 1080 });
         await page.setContent(html, { waitUntil: 'networkidle0' });
 
-        // ✅ ここを修正：omitBackground: true を追加して背景透過に対応
         const imageBuffer = await page.screenshot({
           type: 'png',
           omitBackground: true,
