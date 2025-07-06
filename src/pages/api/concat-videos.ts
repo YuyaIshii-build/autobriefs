@@ -54,6 +54,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     for (let i = 0; i < chunks.length; i++) {
       const chunk = chunks[i];
+
+      if (chunk.length === 0) {
+        console.log(`Skipping empty chunk ${i}`);
+        continue;
+      }
+
       const chunkListPath = path.join(tmpDir, `${videoId}_chunk_${i}.txt`);
       const chunkOutput = path.join(tmpDir, `${videoId}_chunk_${i}.mp4`);
 
@@ -69,8 +75,19 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
       console.log(`Chunk ${i + 1} ffmpeg output:\n${chunkStdout}\n${chunkStderr}`);
 
+      // チャンク生成確認
+      try {
+        await fs.access(chunkOutput);
+      } catch {
+        throw new Error(`Chunk output file not created: ${chunkOutput}`);
+      }
+
       intermediateFiles.push(chunkOutput);
       await fs.unlink(chunkListPath).catch(() => {});
+    }
+
+    if (intermediateFiles.length === 0) {
+      throw new Error('No intermediate chunk files were created.');
     }
 
     // 2. 最終結合
@@ -100,7 +117,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     if (uploadError) {
       console.error('Supabase upload error:', uploadError);
-      return res.status(500).json({ error: 'Failed to upload final video file to Supabase', details: uploadError.message });
+      return res.status(500).json({
+        error: 'Failed to upload final video file to Supabase',
+        details: uploadError.message,
+      });
     }
 
     // 4. 一時ファイル削除
