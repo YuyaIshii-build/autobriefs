@@ -64,9 +64,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
       console.log(`Chunk ${i + 1}/${chunks.length} list:\n${chunkFileContent}`);
 
-      // ✅ チャンクも再エンコード（軽めの設定）
+      // 再エンコード: 解像度・fps・品質
       const ffmpegChunkCmd = `ffmpeg -y -f concat -safe 0 -i "${chunkListPath}" \
--c:v libx264 -preset faster -crf 28 -r 15 \
+-c:v libx264 -preset faster -crf 28 -r 15 -vf scale=1280:720 \
 -c:a aac -b:a 96k "${path.basename(chunkOutput)}"`;
 
       const { stdout: chunkStdout, stderr: chunkStderr } = await execAsync(ffmpegChunkCmd, { cwd: tmpDir });
@@ -89,7 +89,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const finalOutput = path.join(tmpDir, `${videoId}.mp4`);
 
     const ffmpegFinalCmd = `ffmpeg -y -f concat -safe 0 -i "${finalListPath}" \
--c:v libx264 -preset faster -crf 28 -r 15 \
+-c:v libx264 -preset faster -crf 28 -r 15 -vf scale=1280:720 \
 -c:a aac -b:a 96k "${path.basename(finalOutput)}"`;
 
     const { stdout: finalStdout, stderr: finalStderr } = await execAsync(ffmpegFinalCmd, { cwd: tmpDir });
