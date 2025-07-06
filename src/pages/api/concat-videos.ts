@@ -13,6 +13,15 @@ const SUPABASE_URL = process.env.SUPABASE_URL!;
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
+// ユーティリティ: 配列をチャンク分割
+function chunkArray<T>(arr: T[], size: number): T[][] {
+  const res: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) {
+    res.push(arr.slice(i, i + size));
+  }
+  return res;
+}
+
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
     if (req.method !== 'POST') {
@@ -25,12 +34,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(400).json({ error: 'Missing videoId in request body' });
     }
 
-    // 1. /tmp フォルダ内の videoId_*.mp4 ファイルを列挙
     const tmpDir = '/tmp';
     const files = await fs.readdir(tmpDir);
     const videoFiles = files
       .filter(f => f.startsWith(videoId + '_') && f.endsWith('.mp4'))
-      .filter(f => f.includes('segment_')) // segment_xxx のみ対象
+      .filter(f => f.includes('segment_'))
       .sort()
       .map(f => path.join(tmpDir, f));
 
@@ -38,26 +46,53 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(400).json({ error: 'No video segment files found for this videoId' });
     }
 
-    // 2. concat用テキストファイル作成
-    const concatListPath = path.join(tmpDir, `${videoId}_concat_list.txt`);
-    const concatFileContent = videoFiles
+    console.log(`Found ${videoFiles.length} segment files.`);
+
+    // 1. チャンクに分割
+    const chunks = chunkArray(videoFiles, 30);
+    const intermediateFiles: string[] = [];
+
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i];
+      const chunkListPath = path.join(tmpDir, `${videoId}_chunk_${i}.txt`);
+      const chunkOutput = path.join(tmpDir, `${videoId}_chunk_${i}.mp4`);
+
+      const chunkFileContent = chunk
+        .map(f => `file '${path.basename(f)}'`)
+        .join('\n') + '\n';
+      await fs.writeFile(chunkListPath, chunkFileContent, 'utf8');
+
+      console.log(`Chunk ${i + 1}/${chunks.length} list:\n${chunkFileContent}`);
+
+      const ffmpegChunkCmd = `ffmpeg -y -f concat -safe 0 -i "${chunkListPath}" -c copy "${path.basename(chunkOutput)}"`;
+      const { stdout: chunkStdout, stderr: chunkStderr } = await execAsync(ffmpegChunkCmd, { cwd: tmpDir });
+
+      console.log(`Chunk ${i + 1} ffmpeg output:\n${chunkStdout}\n${chunkStderr}`);
+
+      intermediateFiles.push(chunkOutput);
+      await fs.unlink(chunkListPath).catch(() => {});
+    }
+
+    // 2. 最終結合
+    const finalListPath = path.join(tmpDir, `${videoId}_final_list.txt`);
+    const finalFileContent = intermediateFiles
       .map(f => `file '${path.basename(f)}'`)
-      .join('\n') + '\n'; // 最後に改行を追加
-    await fs.writeFile(concatListPath, concatFileContent.replace(/\r\n/g, '\n'), 'utf8');
+      .join('\n') + '\n';
+    await fs.writeFile(finalListPath, finalFileContent, 'utf8');
 
-    console.log('concat list content:\n', concatFileContent);
+    console.log('Final concat list:\n', finalFileContent);
 
-    // 3. ffmpegで連結（cwd指定で作業ディレクトリを/tmpに設定）
-    const outputFileName = `${videoId}.mp4`;
-    const outputPath = path.join(tmpDir, outputFileName);
-    const ffmpegCmd = `ffmpeg -y -f concat -safe 0 -i "${concatListPath}" -c copy "${outputFileName}"`;
-    const { stdout, stderr } = await execAsync(ffmpegCmd, { cwd: tmpDir });
+    const finalOutput = path.join(tmpDir, `${videoId}.mp4`);
+    const ffmpegFinalCmd = `ffmpeg -y -f concat -safe 0 -i "${finalListPath}" -c copy "${path.basename(finalOutput)}"`;
+    const { stdout: finalStdout, stderr: finalStderr } = await execAsync(ffmpegFinalCmd, { cwd: tmpDir });
 
-    // 4. Supabaseに最終動画ファイルをアップロード
-    const videoBuffer = await fs.readFile(outputPath);
+    console.log(`Final ffmpeg output:\n${finalStdout}\n${finalStderr}`);
+
+    // 3. Supabaseにアップロード
+    const videoBuffer = await fs.readFile(finalOutput);
     const { error: uploadError } = await supabase.storage
       .from('projects')
-      .upload(`${videoId}/${outputFileName}`, videoBuffer, {
+      .upload(`${videoId}/${videoId}.mp4`, videoBuffer, {
         cacheControl: '3600',
         upsert: true,
         contentType: 'video/mp4',
@@ -68,26 +103,27 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(500).json({ error: 'Failed to upload final video file to Supabase', details: uploadError.message });
     }
 
-    // 5. 一時ファイルを削除
-    const templatePaths = ['/tmp/loop_mia.mp4', '/tmp/loop_yu.mp4'];
+    // 4. 一時ファイル削除
     await Promise.all([
       ...videoFiles.map(f => fs.unlink(f).catch(() => {})),
-      fs.unlink(concatListPath).catch(() => {}),
-      fs.unlink(outputPath).catch(() => {}),
-      ...templatePaths.map(p => fs.unlink(p).catch(() => {})),
+      ...intermediateFiles.map(f => fs.unlink(f).catch(() => {})),
+      fs.unlink(finalListPath).catch(() => {}),
+      fs.unlink(finalOutput).catch(() => {}),
     ]);
 
-    // 6. 成功レスポンス
     res.status(200).json({
       message: 'Videos concatenated and uploaded successfully',
-      outputFileName,
-      ffmpegStdout: stdout,
-      ffmpegStderr: stderr,
-      videoUrl: `${SUPABASE_URL}/storage/v1/object/public/projects/${videoId}/${outputFileName}`,
+      outputFileName: `${videoId}.mp4`,
+      videoUrl: `${SUPABASE_URL}/storage/v1/object/public/projects/${videoId}/${videoId}.mp4`,
+      ffmpegStdout: finalStdout,
+      ffmpegStderr: finalStderr,
     });
 
   } catch (error) {
     console.error('concat-videos error:', error);
-    res.status(500).json({ error: 'Failed to concatenate videos', details: error instanceof Error ? error.message : error });
+    res.status(500).json({
+      error: 'Failed to concatenate videos',
+      details: error instanceof Error ? error.message : String(error),
+    });
   }
 }
