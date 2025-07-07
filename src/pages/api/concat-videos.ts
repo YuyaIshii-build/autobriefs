@@ -5,6 +5,7 @@ import { exec } from 'child_process';
 import util from 'util';
 import path from 'path';
 import fs from 'fs/promises';
+import fsSync from 'fs';
 import { createClient } from '@supabase/supabase-js';
 
 const execAsync = util.promisify(exec);
@@ -12,6 +13,14 @@ const execAsync = util.promisify(exec);
 const SUPABASE_URL = process.env.SUPABASE_URL!;
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+
+function chunkArray<T>(arr: T[], size: number): T[][] {
+  const res: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) res.push(arr.slice(i, i + size));
+  return res;
+}
+
+const escapePath = (p: string) => p.replace(/'/g, "'\\''");
 
 async function validateFileReady(filePath: string) {
   const stat = await fs.stat(filePath);
@@ -31,17 +40,11 @@ async function runFfmpegWithRetry(cmd: string, cwd: string) {
     } catch (e) {
       console.error(`❌ ffmpeg failed [attempt ${attempt}]: ${e instanceof Error ? e.message : String(e)}`);
       if (attempt === 3) throw e;
-      console.log('⏳ Waiting 5 sec before retry...');
-      await new Promise((r) => setTimeout(r, 5000));
+      console.log('⏳ Waiting 10 sec before retry...');
+      await new Promise((r) => setTimeout(r, 10000));
     }
   }
   throw new Error('ffmpeg failed after retries');
-}
-
-function chunkArray<T>(arr: T[], size: number): T[][] {
-  const res: T[][] = [];
-  for (let i = 0; i < arr.length; i += size) res.push(arr.slice(i, i + size));
-  return res;
 }
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -76,11 +79,14 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       const chunkListPath = path.join(tmpDir, `${videoId}_chunk_${i}.txt`);
       const chunkOutput = path.join(tmpDir, `${videoId}_chunk_${i}.mp4`);
 
-      const listContent = chunk.map(f => `file '${f}'`).join('\n') + '\n';
+      for (const f of chunk) {
+        if (!fsSync.existsSync(f)) throw new Error(`Segment file does not exist: ${f}`);
+      }
+
+      const listContent = chunk.map(f => `file '${escapePath(f)}'`).join('\n') + '\n';
       await fs.writeFile(chunkListPath, listContent);
       console.log(`📝 Chunk ${i + 1}/${chunks.length} list:\n${listContent}`);
 
-      // ✅ Copy-only concat
       const ffmpegChunkCmd = `ffmpeg -y -f concat -safe 0 -i "${chunkListPath}" -c copy -movflags +faststart "${chunkOutput}"`;
       const { stdout, stderr } = await runFfmpegWithRetry(ffmpegChunkCmd, tmpDir);
 
@@ -95,7 +101,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     const finalListPath = path.join(tmpDir, `${videoId}_final_list.txt`);
     const finalOutput = path.join(tmpDir, `${videoId}.mp4`);
-    const finalListContent = intermediateFiles.map(f => `file '${f}'`).join('\n') + '\n';
+    const finalListContent = intermediateFiles.map(f => `file '${escapePath(f)}'`).join('\n') + '\n';
     await fs.writeFile(finalListPath, finalListContent);
     console.log('📝 Final concat list:\n', finalListContent);
 
