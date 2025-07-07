@@ -76,6 +76,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       const duration = Math.round(rawDuration * 1000) / 1000;
       if (isNaN(duration)) throw new Error('Invalid audio duration');
 
+      // ✅ 再エンコード＋圧縮付き ffmpegコマンド
       const cmd = `
         ffmpeg -y \
         -i "${templatePath}" \
@@ -83,7 +84,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         -i "${audioPath}" \
         -filter_complex "[0:v][1:v] overlay=0:0:enable='between(t,0,${duration})'" \
         -map 0:v -map 2:a \
-        -c:v libx264 -preset veryfast -c:a aac -shortest -t ${duration} "${outputPath}"
+        -c:v libx264 -preset faster -crf 28 -r 15 -vf scale=1280:720 \
+        -movflags +faststart -c:a aac -b:a 96k -shortest -t ${duration} "${outputPath}"
       `;
 
       await execAsync(cmd);

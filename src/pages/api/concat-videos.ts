@@ -13,12 +13,11 @@ const SUPABASE_URL = process.env.SUPABASE_URL!;
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-// ファイルの存在・サイズ・更新時刻を確認
 async function validateFileReady(filePath: string) {
   const stat = await fs.stat(filePath);
   if (stat.size === 0) throw new Error(`File ${filePath} is empty`);
   const ageMs = Date.now() - stat.mtimeMs;
-  if (ageMs < 10000) throw new Error(`File ${filePath} may still be being written (age ${ageMs} ms)`);
+  if (ageMs < 5000) throw new Error(`File ${filePath} may still be being written (age ${ageMs} ms)`);
   console.log(`✅ File ready: ${filePath} (size: ${stat.size}, age: ${ageMs} ms)`);
 }
 
@@ -81,7 +80,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       await fs.writeFile(chunkListPath, listContent);
       console.log(`📝 Chunk ${i + 1}/${chunks.length} list:\n${listContent}`);
 
-      const ffmpegChunkCmd = `ffmpeg -y -f concat -safe 0 -i "${chunkListPath}" -c:v libx264 -preset faster -crf 28 -r 15 -vf scale=1280:720 -movflags +faststart -c:a aac -b:a 96k "${chunkOutput}"`;
+      // ✅ Copy-only concat
+      const ffmpegChunkCmd = `ffmpeg -y -f concat -safe 0 -i "${chunkListPath}" -c copy -movflags +faststart "${chunkOutput}"`;
       const { stdout, stderr } = await runFfmpegWithRetry(ffmpegChunkCmd, tmpDir);
 
       console.log(`📄 Chunk ${i + 1} ffmpeg stdout:\n${stdout}`);
@@ -124,7 +124,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     console.log(`🧹 Cleanup completed.`);
 
     res.status(200).json({
-      message: 'Videos concatenated, compressed, and uploaded successfully',
+      message: 'Videos concatenated and uploaded successfully',
       outputFileName: `${videoId}.mp4`,
       videoUrl: `${SUPABASE_URL}/storage/v1/object/public/projects/${videoId}/${videoId}.mp4`,
       ffmpegStdout: finalStdout,
