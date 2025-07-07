@@ -76,10 +76,14 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const tmpDir = '/tmp';
     console.log(`🔍 Reading directory: ${tmpDir}`);
     const files = await fs.readdir(tmpDir);
+
     const videoFiles = files
       .filter(f => f.startsWith(videoId + '_') && f.endsWith('.mp4'))
       .filter(f => f.includes('segment_'))
-      .sort()
+      .sort((a, b) => {
+        const extractNumber = (name: string) => parseInt(name.match(/segment_(\d+)\.mp4/)?.[1] || '0', 10);
+        return extractNumber(a) - extractNumber(b);
+      })
       .map(f => path.join(tmpDir, f));
 
     if (videoFiles.length === 0) return res.status(400).json({ error: 'No video segment files found' });
