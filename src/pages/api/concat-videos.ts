@@ -29,11 +29,28 @@ async function validateFileReady(filePath: string) {
   console.log(`✅ File ready: ${filePath} (size: ${stat.size}, age: ${ageMs} ms)`);
 }
 
-async function runFfmpegWithRetry(cmd: string, cwd: string) {
+async function waitForFileAccessible(filePath: string, retries = 10, interval = 100) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      await fs.access(filePath);
+      return;
+    } catch {
+      await new Promise((res) => setTimeout(res, interval));
+    }
+  }
+  throw new Error(`File ${filePath} not accessible after ${retries} retries`);
+}
+
+async function runFfmpegWithRetry(cmd: string, cwd: string, outputFilePath?: string) {
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      console.log(`▶️ [ffmpeg attempt ${attempt}] ${cmd}`);
+      console.log(`▶️ [${new Date().toISOString()}] [ffmpeg attempt ${attempt}] ${cmd}`);
       const { stdout, stderr } = await execAsync(cmd, { cwd });
+
+      if (outputFilePath) {
+        await waitForFileAccessible(outputFilePath, 10, 200);
+      }
+
       console.log(`✅ ffmpeg success [attempt ${attempt}]`);
       return { stdout, stderr };
     } catch (e) {
@@ -80,18 +97,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
       const listContent = chunk.map(f => `file '${escapePath(f)}'`).join('\n') + '\n';
       await fs.writeFile(chunkListPath, listContent);
+      await waitForFileAccessible(chunkListPath, 10, 100);
 
-      // validate chunkListPath was written successfully
-      try {
-        await fs.access(chunkListPath);
-      } catch {
-        throw new Error(`Chunk list file not written: ${chunkListPath}`);
-      }
-
-      console.log(`📝 Chunk ${i + 1}/${chunks.length} list:\n${listContent}`);
+      console.log(`[${new Date().toISOString()}] 📝 Chunk ${i + 1}/${chunks.length} list:\n${listContent}`);
 
       const ffmpegChunkCmd = `ffmpeg -y -f concat -safe 0 -i "${chunkListPath}" -c copy -movflags +faststart "${chunkOutput}"`;
-      const { stdout, stderr } = await runFfmpegWithRetry(ffmpegChunkCmd, tmpDir);
+      const { stdout, stderr } = await runFfmpegWithRetry(ffmpegChunkCmd, tmpDir, chunkOutput);
 
       console.log(`📄 Chunk ${i + 1} ffmpeg stdout:\n${stdout}`);
       console.log(`📄 Chunk ${i + 1} ffmpeg stderr:\n${stderr}`);
@@ -106,11 +117,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const finalOutput = path.join(tmpDir, `${videoId}.mp4`);
     const finalListContent = intermediateFiles.map(f => `file '${escapePath(f)}'`).join('\n') + '\n';
     await fs.writeFile(finalListPath, finalListContent);
-    console.log('📝 Final concat list:\n', finalListContent);
+    await waitForFileAccessible(finalListPath, 10, 100);
+
+    console.log(`[${new Date().toISOString()}] 📝 Final concat list:\n${finalListContent}`);
 
     const ffmpegFinalCmd = `ffmpeg -y -f concat -safe 0 -i "${finalListPath}" -c copy -movflags +faststart "${finalOutput}"`;
-    console.log('🚀 Running final concat without re-encoding...');
-    const { stdout: finalStdout, stderr: finalStderr } = await runFfmpegWithRetry(ffmpegFinalCmd, tmpDir);
+    console.log(`[${new Date().toISOString()}] 🚀 Running final concat...`);
+    const { stdout: finalStdout, stderr: finalStderr } = await runFfmpegWithRetry(ffmpegFinalCmd, tmpDir, finalOutput);
 
     console.log(`✅ Final ffmpeg stdout:\n${finalStdout}`);
     console.log(`✅ Final ffmpeg stderr:\n${finalStderr}`);
@@ -118,7 +131,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     console.log(`⬆️ Uploading final video to Supabase...`);
     const videoBuffer = await fs.readFile(finalOutput);
     const { error: uploadError } = await supabase.storage.from('projects').upload(`${videoId}/${videoId}.mp4`, videoBuffer, {
-      cacheControl: '3600', upsert: true, contentType: 'video/mp4',
+      cacheControl: '3600',
+      upsert: true,
+      contentType: 'video/mp4',
     });
 
     if (uploadError) return res.status(500).json({ error: 'Supabase upload failed', details: uploadError.message });
