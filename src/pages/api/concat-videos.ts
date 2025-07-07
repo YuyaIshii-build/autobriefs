@@ -113,7 +113,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       console.log(`📄 Chunk ${i + 1} ffmpeg stdout:\n${stdout}`);
       console.log(`📄 Chunk ${i + 1} ffmpeg stderr:\n${stderr}`);
 
-      await sleep(1000); // ← この一行を追加：ffmpeg直後に念のため待機
+      await sleep(10000); // ← この一行を追加：ffmpeg直後に念のため待機
       intermediateFiles.push(chunkOutput);
       await fs.unlink(chunkListPath).catch(() => {});
     }
