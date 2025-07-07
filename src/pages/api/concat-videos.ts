@@ -1,6 +1,5 @@
 // pages/api/concat-videos.ts
 
-
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { exec } from 'child_process';
 import util from 'util';
@@ -80,11 +79,22 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       const chunkListPath = path.join(tmpDir, `${videoId}_chunk_${i}.txt`);
       const chunkOutput = path.join(tmpDir, `${videoId}_chunk_${i}.mp4`);
 
+      const validatedChunk: string[] = [];
       for (const f of chunk) {
-        if (!fsSync.existsSync(f)) throw new Error(`Segment file does not exist: ${f}`);
+        try {
+          await validateFileReady(f);
+          validatedChunk.push(f);
+        } catch (e) {
+          console.warn(`⚠️ Skipping invalid or incomplete segment: ${f} - ${e instanceof Error ? e.message : e}`);
+        }
       }
 
-      const listContent = chunk.map(f => `file '${escapePath(f)}'`).join('\n') + '\n';
+      if (validatedChunk.length === 0) {
+        console.warn(`⚠️ No valid segments in chunk ${i}, skipping...`);
+        continue;
+      }
+
+      const listContent = validatedChunk.map(f => `file '${escapePath(f)}'`).join('\n') + '\n';
       await fs.writeFile(chunkListPath, listContent);
       console.log(`📝 Chunk ${i + 1}/${chunks.length} list:\n${listContent}`);
 
@@ -96,6 +106,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
       intermediateFiles.push(chunkOutput);
       await fs.unlink(chunkListPath).catch(() => {});
+    }
+
+    if (intermediateFiles.length === 0) {
+      return res.status(500).json({ error: 'No valid intermediate chunk files generated' });
     }
 
     for (const f of intermediateFiles) await validateFileReady(f);
