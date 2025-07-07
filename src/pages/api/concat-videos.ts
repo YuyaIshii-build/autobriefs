@@ -6,6 +6,7 @@ import util from 'util';
 import path from 'path';
 import fs from 'fs/promises';
 import { createClient } from '@supabase/supabase-js';
+import crypto from 'crypto';
 
 const execAsync = util.promisify(exec);
 
@@ -48,28 +49,29 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     console.log(`Found ${videoFiles.length} segment files.`);
 
-    // 1. チャンクに分割
+    // チャンクに分割
     const chunks = chunkArray(videoFiles, 30);
     const intermediateFiles: string[] = [];
 
     for (let i = 0; i < chunks.length; i++) {
       const chunk = chunks[i];
-      const chunkListPath = path.join(tmpDir, `${videoId}_chunk_${i}.txt`);
-      const chunkOutput = path.join(tmpDir, `${videoId}_chunk_${i}.mp4`);
+      const uniqueId = crypto.randomUUID();
+      const chunkListPath = path.join(tmpDir, `${videoId}_${uniqueId}_chunk_${i}.txt`);
+      const chunkOutput = path.join(tmpDir, `${videoId}_${uniqueId}_chunk_${i}.mp4`);
 
       const chunkFileContent = chunk
-        .map(f => `file '${path.basename(f)}'`)
+        .map(f => `file '${f}'`) // ✅ 絶対パスに修正
         .join('\n') + '\n';
       await fs.writeFile(chunkListPath, chunkFileContent, 'utf8');
 
       console.log(`Chunk ${i + 1}/${chunks.length} list:\n${chunkFileContent}`);
 
-      // 再エンコード: 解像度・fps・品質
+      // 出力パスは絶対パスに
       const ffmpegChunkCmd = `ffmpeg -y -f concat -safe 0 -i "${chunkListPath}" \
 -c:v libx264 -preset faster -crf 28 -r 15 -vf scale=1280:720 \
--c:a aac -b:a 96k "${path.basename(chunkOutput)}"`;
+-c:a aac -b:a 96k "${chunkOutput}"`;
 
-      const { stdout: chunkStdout, stderr: chunkStderr } = await execAsync(ffmpegChunkCmd, { cwd: tmpDir });
+      const { stdout: chunkStdout, stderr: chunkStderr } = await execAsync(ffmpegChunkCmd);
 
       console.log(`Chunk ${i + 1} ffmpeg output:\n${chunkStdout}\n${chunkStderr}`);
 
@@ -77,26 +79,27 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       await fs.unlink(chunkListPath).catch(() => {});
     }
 
-    // 2. 最終結合（再エンコード）
-    const finalListPath = path.join(tmpDir, `${videoId}_final_list.txt`);
+    // 最終結合
+    const uniqueId = crypto.randomUUID();
+    const finalListPath = path.join(tmpDir, `${videoId}_${uniqueId}_final_list.txt`);
     const finalFileContent = intermediateFiles
-      .map(f => `file '${path.basename(f)}'`)
+      .map(f => `file '${f}'`) // ✅ 絶対パス
       .join('\n') + '\n';
     await fs.writeFile(finalListPath, finalFileContent, 'utf8');
 
     console.log('Final concat list:\n', finalFileContent);
 
-    const finalOutput = path.join(tmpDir, `${videoId}.mp4`);
+    const finalOutput = path.join(tmpDir, `${videoId}_${uniqueId}_final.mp4`);
 
     const ffmpegFinalCmd = `ffmpeg -y -f concat -safe 0 -i "${finalListPath}" \
 -c:v libx264 -preset faster -crf 28 -r 15 -vf scale=1280:720 \
--c:a aac -b:a 96k "${path.basename(finalOutput)}"`;
+-c:a aac -b:a 96k "${finalOutput}"`;
 
-    const { stdout: finalStdout, stderr: finalStderr } = await execAsync(ffmpegFinalCmd, { cwd: tmpDir });
+    const { stdout: finalStdout, stderr: finalStderr } = await execAsync(ffmpegFinalCmd);
 
     console.log(`Final ffmpeg output:\n${finalStdout}\n${finalStderr}`);
 
-    // 3. Supabaseにアップロード
+    // Supabaseにアップロード
     const videoBuffer = await fs.readFile(finalOutput);
     const { error: uploadError } = await supabase.storage
       .from('projects')
@@ -114,7 +117,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       });
     }
 
-    // 4. 一時ファイル削除
+    // 一時ファイル削除
     await Promise.all([
       ...videoFiles.map(f => fs.unlink(f).catch(() => {})),
       ...intermediateFiles.map(f => fs.unlink(f).catch(() => {})),
