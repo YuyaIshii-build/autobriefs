@@ -1,3 +1,5 @@
+// pages/api/render-slide.ts
+
 import puppeteer from 'puppeteer';
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { createClient } from '@supabase/supabase-js';
@@ -33,48 +35,24 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     // 🧵 非同期処理スタート
     setImmediate(async () => {
-      try {
-        const browser = await puppeteer.launch({
-          headless: true,
-          args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--single-process',
-            '--no-zygote',
-            `--user-data-dir=/tmp/puppeteer_user_data`,
-          ],
-        });
+      const maxAttempts = 3;
 
-        const page = await browser.newPage();
-        await page.setViewport({ width: 1920, height: 1080 });
-        await page.setContent(html, { waitUntil: 'networkidle0' });
-
-        const imageBuffer = await page.screenshot({
-          type: 'png',
-          omitBackground: true,
-        });
-
-        await browser.close();
-
-        const filePath = `${videoId}/${segmentId}/slide.png`;
-
-        const { error: uploadError } = await supabase.storage
-          .from('projects')
-          .upload(filePath, imageBuffer, {
-            contentType: 'image/png',
-            upsert: true,
-            cacheControl: '3600',
-          });
-
-        if (uploadError) {
-          console.error('❌ Upload failed:', uploadError.message);
-        } else {
-          console.log('✅ Upload succeeded:', filePath);
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+          console.log(`🔁 Puppeteer rendering attempt ${attempt}`);
+          await renderSlide(html, videoId, segmentId);
+          console.log('✅ Rendering succeeded');
+          break;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          console.error(`❌ Rendering failed (attempt ${attempt}):`, message);
+          if (attempt === maxAttempts) {
+            console.error('🛑 Giving up after 3 attempts');
+          } else {
+            console.log('⏳ Retrying in 5s...');
+            await new Promise((res) => setTimeout(res, 5000));
+          }
         }
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        console.error('❌ Rendering failed:', message);
       }
     });
 
@@ -83,4 +61,45 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     console.error('❌ API entry error:', message);
     return res.status(500).json({ error: 'Internal Server Error', details: message });
   }
+}
+
+async function renderSlide(html: string, videoId: string, segmentId: string) {
+  const browser = await puppeteer.launch({
+    headless: true,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--single-process',
+      '--no-zygote',
+      `--user-data-dir=/tmp/puppeteer_user_data`,
+    ],
+  });
+
+  const page = await browser.newPage();
+  await page.setViewport({ width: 1920, height: 1080 });
+  await page.setContent(html, { waitUntil: 'networkidle0' });
+
+  const imageBuffer = await page.screenshot({
+    type: 'png',
+    omitBackground: true,
+  });
+
+  await browser.close();
+
+  const filePath = `${videoId}/${segmentId}/slide.png`;
+
+  const { error: uploadError } = await supabase.storage
+    .from('projects')
+    .upload(filePath, imageBuffer, {
+      contentType: 'image/png',
+      upsert: true,
+      cacheControl: '3600',
+    });
+
+  if (uploadError) {
+    throw new Error(`Upload failed: ${uploadError.message}`);
+  }
+
+  console.log('✅ Upload succeeded:', filePath);
 }
