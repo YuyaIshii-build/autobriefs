@@ -21,6 +21,8 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
 
 const escapePath = (p: string) => p.replace(/'/g, "'\\''");
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 async function validateFileReady(filePath: string) {
   const stat = await fs.stat(filePath);
   if (stat.size === 0) throw new Error(`File ${filePath} is empty`);
@@ -111,6 +113,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       console.log(`📄 Chunk ${i + 1} ffmpeg stdout:\n${stdout}`);
       console.log(`📄 Chunk ${i + 1} ffmpeg stderr:\n${stderr}`);
 
+      await sleep(1000); // ← この一行を追加：ffmpeg直後に念のため待機
       intermediateFiles.push(chunkOutput);
       await fs.unlink(chunkListPath).catch(() => {});
     }
