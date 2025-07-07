@@ -16,17 +16,12 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 // ファイルの存在・サイズ・更新時刻を確認
 async function validateFileReady(filePath: string) {
   const stat = await fs.stat(filePath);
-  if (stat.size === 0) {
-    throw new Error(`File ${filePath} is empty`);
-  }
+  if (stat.size === 0) throw new Error(`File ${filePath} is empty`);
   const ageMs = Date.now() - stat.mtimeMs;
-  if (ageMs < 10000) {
-    throw new Error(`File ${filePath} may still be being written (age ${ageMs} ms)`);
-  }
+  if (ageMs < 10000) throw new Error(`File ${filePath} may still be being written (age ${ageMs} ms)`);
   console.log(`✅ File ready: ${filePath} (size: ${stat.size}, age: ${ageMs} ms)`);
 }
 
-// ffmpeg実行 + リトライ
 async function runFfmpegWithRetry(cmd: string, cwd: string) {
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
@@ -44,12 +39,9 @@ async function runFfmpegWithRetry(cmd: string, cwd: string) {
   throw new Error('ffmpeg failed after retries');
 }
 
-// 配列をチャンク分割
 function chunkArray<T>(arr: T[], size: number): T[][] {
   const res: T[][] = [];
-  for (let i = 0; i < arr.length; i += size) {
-    res.push(arr.slice(i, i + size));
-  }
+  for (let i = 0; i < arr.length; i += size) res.push(arr.slice(i, i + size));
   return res;
 }
 
@@ -61,9 +53,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     }
 
     const { videoId } = req.body;
-    if (!videoId) {
-      return res.status(400).json({ error: 'Missing videoId in request body' });
-    }
+    if (!videoId) return res.status(400).json({ error: 'Missing videoId in request body' });
 
     const tmpDir = '/tmp';
     console.log(`🔍 Reading directory: ${tmpDir}`);
@@ -74,18 +64,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       .sort()
       .map(f => path.join(tmpDir, f));
 
-    if (videoFiles.length === 0) {
-      return res.status(400).json({ error: 'No video segment files found for this videoId' });
-    }
-
+    if (videoFiles.length === 0) return res.status(400).json({ error: 'No video segment files found' });
     console.log(`🟢 Found ${videoFiles.length} segment files.`);
 
-    // 1. validate files
-    for (const f of videoFiles) {
-      await validateFileReady(f);
-    }
+    for (const f of videoFiles) await validateFileReady(f);
 
-    // 2. チャンク分割
     const chunks = chunkArray(videoFiles, 30);
     const intermediateFiles: string[] = [];
 
@@ -94,72 +77,44 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       const chunkListPath = path.join(tmpDir, `${videoId}_chunk_${i}.txt`);
       const chunkOutput = path.join(tmpDir, `${videoId}_chunk_${i}.mp4`);
 
-      const chunkFileContent = chunk
-        .map(f => `file '${f}'`)
-        .join('\n') + '\n';
-      await fs.writeFile(chunkListPath, chunkFileContent, 'utf8');
+      const listContent = chunk.map(f => `file '${f}'`).join('\n') + '\n';
+      await fs.writeFile(chunkListPath, listContent);
+      console.log(`📝 Chunk ${i + 1}/${chunks.length} list:\n${listContent}`);
 
-      console.log(`📝 Chunk ${i + 1}/${chunks.length} list:\n${chunkFileContent}`);
+      const ffmpegChunkCmd = `ffmpeg -y -f concat -safe 0 -i "${chunkListPath}" -c:v libx264 -preset faster -crf 28 -r 15 -vf scale=1280:720 -movflags +faststart -c:a aac -b:a 96k "${chunkOutput}"`;
+      const { stdout, stderr } = await runFfmpegWithRetry(ffmpegChunkCmd, tmpDir);
 
-      const ffmpegChunkCmd = `ffmpeg -y -f concat -safe 0 -i "${chunkListPath}" \
--c:v libx264 -preset faster -crf 28 -r 15 -vf scale=1280:720 -movflags +faststart \
--c:a aac -b:a 96k "${chunkOutput}"`;
-
-      const { stdout: chunkStdout, stderr: chunkStderr } = await runFfmpegWithRetry(ffmpegChunkCmd, tmpDir);
-
-      console.log(`📄 Chunk ${i + 1} ffmpeg stdout:\n${chunkStdout}`);
-      console.log(`📄 Chunk ${i + 1} ffmpeg stderr:\n${chunkStderr}`);
+      console.log(`📄 Chunk ${i + 1} ffmpeg stdout:\n${stdout}`);
+      console.log(`📄 Chunk ${i + 1} ffmpeg stderr:\n${stderr}`);
 
       intermediateFiles.push(chunkOutput);
       await fs.unlink(chunkListPath).catch(() => {});
     }
 
-    // 3. validate intermediate files
-    for (const f of intermediateFiles) {
-      await validateFileReady(f);
-    }
+    for (const f of intermediateFiles) await validateFileReady(f);
 
-    // 4. 最終結合（再エンコードなし）
     const finalListPath = path.join(tmpDir, `${videoId}_final_list.txt`);
-    const finalFileContent = intermediateFiles
-      .map(f => `file '${f}'`)
-      .join('\n') + '\n';
-    await fs.writeFile(finalListPath, finalFileContent, 'utf8');
-
-    console.log('📝 Final concat list:\n', finalFileContent);
-
     const finalOutput = path.join(tmpDir, `${videoId}.mp4`);
+    const finalListContent = intermediateFiles.map(f => `file '${f}'`).join('\n') + '\n';
+    await fs.writeFile(finalListPath, finalListContent);
+    console.log('📝 Final concat list:\n', finalListContent);
 
-    const ffmpegFinalCmd = `ffmpeg -y -f concat -safe 0 -i "${finalListPath}" \
--c copy -movflags +faststart "${finalOutput}"`;
-
+    const ffmpegFinalCmd = `ffmpeg -y -f concat -safe 0 -i "${finalListPath}" -c copy -movflags +faststart "${finalOutput}"`;
+    console.log('🚀 Running final concat without re-encoding...');
     const { stdout: finalStdout, stderr: finalStderr } = await runFfmpegWithRetry(ffmpegFinalCmd, tmpDir);
 
     console.log(`✅ Final ffmpeg stdout:\n${finalStdout}`);
     console.log(`✅ Final ffmpeg stderr:\n${finalStderr}`);
 
-    // 5. Supabaseにアップロード
     console.log(`⬆️ Uploading final video to Supabase...`);
     const videoBuffer = await fs.readFile(finalOutput);
-    const { error: uploadError } = await supabase.storage
-      .from('projects')
-      .upload(`${videoId}/${videoId}.mp4`, videoBuffer, {
-        cacheControl: '3600',
-        upsert: true,
-        contentType: 'video/mp4',
-      });
+    const { error: uploadError } = await supabase.storage.from('projects').upload(`${videoId}/${videoId}.mp4`, videoBuffer, {
+      cacheControl: '3600', upsert: true, contentType: 'video/mp4',
+    });
 
-    if (uploadError) {
-      console.error('❌ Supabase upload error:', uploadError);
-      return res.status(500).json({
-        error: 'Failed to upload final video file to Supabase',
-        details: uploadError.message,
-      });
-    }
-
+    if (uploadError) return res.status(500).json({ error: 'Supabase upload failed', details: uploadError.message });
     console.log(`✅ Upload complete.`);
 
-    // 6. Cleanup
     await Promise.all([
       ...videoFiles.map(f => fs.unlink(f).catch(() => {})),
       ...intermediateFiles.map(f => fs.unlink(f).catch(() => {})),
@@ -175,7 +130,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       ffmpegStdout: finalStdout,
       ffmpegStderr: finalStderr,
     });
-
   } catch (error) {
     console.error('❌ concat-videos error:', error);
     res.status(500).json({
