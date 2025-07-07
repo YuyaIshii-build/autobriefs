@@ -80,6 +80,14 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
       const listContent = chunk.map(f => `file '${escapePath(f)}'`).join('\n') + '\n';
       await fs.writeFile(chunkListPath, listContent);
+
+      // validate chunkListPath was written successfully
+      try {
+        await fs.access(chunkListPath);
+      } catch {
+        throw new Error(`Chunk list file not written: ${chunkListPath}`);
+      }
+
       console.log(`📝 Chunk ${i + 1}/${chunks.length} list:\n${listContent}`);
 
       const ffmpegChunkCmd = `ffmpeg -y -f concat -safe 0 -i "${chunkListPath}" -c copy -movflags +faststart "${chunkOutput}"`;
