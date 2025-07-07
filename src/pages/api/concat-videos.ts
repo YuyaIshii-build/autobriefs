@@ -119,7 +119,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       await validateFileReady(f);
     }
 
-    // 4. 最終結合
+    // 4. 最終結合（再エンコードなし）
     const finalListPath = path.join(tmpDir, `${videoId}_final_list.txt`);
     const finalFileContent = intermediateFiles
       .map(f => `file '${f}'`)
@@ -131,8 +131,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const finalOutput = path.join(tmpDir, `${videoId}.mp4`);
 
     const ffmpegFinalCmd = `ffmpeg -y -f concat -safe 0 -i "${finalListPath}" \
--c:v libx264 -preset faster -crf 28 -r 15 -vf scale=1280:720 -movflags +faststart \
--c:a aac -b:a 96k "${finalOutput}"`;
+-c copy -movflags +faststart "${finalOutput}"`;
 
     const { stdout: finalStdout, stderr: finalStderr } = await runFfmpegWithRetry(ffmpegFinalCmd, tmpDir);
 
