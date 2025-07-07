@@ -68,7 +68,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         console.log(`[generate-convo-video] Using cached template for ${speaker}`);
       }
 
-      // duration取得（小数第3位に丸め）
       const { stdout: durationOut } = await execAsync(
         `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${audioPath}"`
       );
@@ -76,15 +75,14 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       const duration = Math.round(rawDuration * 1000) / 1000;
       if (isNaN(duration)) throw new Error('Invalid audio duration');
 
-      // ✅ 再エンコード＋圧縮付き ffmpegコマンド
       const cmd = `
         ffmpeg -y \
         -i "${templatePath}" \
         -i "${slidePath}" \
         -i "${audioPath}" \
-        -filter_complex "[0:v][1:v] overlay=0:0:enable='between(t,0,${duration})'" \
+        -filter_complex "[0:v][1:v] overlay=0:0:enable='between(t,0,${duration})',scale=1280:720" \
         -map 0:v -map 2:a \
-        -c:v libx264 -preset faster -crf 28 -r 15 -vf scale=1280:720 \
+        -c:v libx264 -preset faster -crf 28 -r 15 \
         -movflags +faststart -c:a aac -b:a 96k -shortest -t ${duration} "${outputPath}"
       `;
 
