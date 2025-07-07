@@ -13,16 +13,17 @@ const SUPABASE_URL = process.env.SUPABASE_URL!;
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-// ファイルの存在・サイズ確認
+// ファイルの存在・サイズ・更新時刻を確認
 async function validateFileReady(filePath: string) {
   const stat = await fs.stat(filePath);
   if (stat.size === 0) {
     throw new Error(`File ${filePath} is empty`);
   }
-  if (Date.now() - stat.mtimeMs < 5000) {
-    throw new Error(`File ${filePath} may still be being written`);
+  const ageMs = Date.now() - stat.mtimeMs;
+  if (ageMs < 10000) {
+    throw new Error(`File ${filePath} may still be being written (age ${ageMs} ms)`);
   }
-  console.log(`✅ File ready: ${filePath} (size: ${stat.size})`);
+  console.log(`✅ File ready: ${filePath} (size: ${stat.size}, age: ${ageMs} ms)`);
 }
 
 // ffmpeg実行 + リトライ
