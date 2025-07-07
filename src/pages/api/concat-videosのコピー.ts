@@ -23,32 +23,12 @@ const escapePath = (p: string) => p.replace(/'/g, "'\\''");
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function validateFileReady(filePath: string, retries = 10, interval = 2000) {
-  for (let i = 0; i < retries; i++) {
-    try {
-      await waitForFileAccessible(filePath, 10, 200);
-      const stat = await fs.stat(filePath);
-      const ageMs = Date.now() - stat.mtimeMs;
-
-      if (stat.size === 0) {
-        console.warn(`⏳ [Attempt ${i + 1}] File ${filePath} is empty. Retrying...`);
-        throw new Error('File is empty');
-      }
-
-      if (ageMs < 5000) {
-        console.warn(`⏳ [Attempt ${i + 1}] File ${filePath} is too new (age ${ageMs} ms). Retrying...`);
-        throw new Error('File is too new');
-      }
-
-      console.log(`✅ File ready: ${filePath} (size: ${stat.size}, age: ${ageMs} ms)`);
-      return;
-    } catch {
-      if (i === retries - 1) {
-        throw new Error(`File ${filePath} not ready after ${retries} attempts`);
-      }
-      await sleep(interval);
-    }
-  }
+async function validateFileReady(filePath: string) {
+  const stat = await fs.stat(filePath);
+  if (stat.size === 0) throw new Error(`File ${filePath} is empty`);
+  const ageMs = Date.now() - stat.mtimeMs;
+  if (ageMs < 5000) throw new Error(`File ${filePath} may still be being written (age ${ageMs} ms)`);
+  console.log(`✅ File ready: ${filePath} (size: ${stat.size}, age: ${ageMs} ms)`);
 }
 
 async function waitForFileAccessible(filePath: string, retries = 10, interval = 100) {
@@ -133,7 +113,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       console.log(`📄 Chunk ${i + 1} ffmpeg stdout:\n${stdout}`);
       console.log(`📄 Chunk ${i + 1} ffmpeg stderr:\n${stderr}`);
 
-      await sleep(10000);
+      await sleep(10000); // ← この一行を追加：ffmpeg直後に念のため待機
       intermediateFiles.push(chunkOutput);
       await fs.unlink(chunkListPath).catch(() => {});
     }
