@@ -29,7 +29,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   const basePath = `https://dqeonmqfumkblxintbbz.supabase.co/storage/v1/object/public/projects/${videoId}/${segmentId}`;
   const audioUrl = `${basePath}/audio.mp3`;
   const slideUrl = `${basePath}/slide.png`;
-  const templateUrl = `https://dqeonmqfumkblxintbbz.supabase.co/storage/v1/object/public/projects/99_Loop/${type}/loop_${speaker.toLowerCase()}.mp4`;
 
   res.status(202).json({
     message: 'Conversation video generation started',
@@ -40,6 +39,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   setTimeout(async () => {
     try {
       console.log(`[generate-convo-video] Start: ${videoId}/${segmentId} (${speaker})`);
+
+      const templateUrl =
+        speaker === 'Mia'
+          ? `https://dqeonmqfumkblxintbbz.supabase.co/storage/v1/object/public/projects/99_Loop/${type}/loop_Mia.mp4`
+          : `https://dqeonmqfumkblxintbbz.supabase.co/storage/v1/object/public/projects/99_Loop/${type}/loop_Yu.mp4`;
 
       const tmpBase = `/tmp/${videoId}_${segmentId}`;
       const audioPath = `${tmpBase}_audio.mp3`;
