@@ -20,18 +20,16 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  const { videoId, segmentId, speaker } = req.body;
+  const { videoId, segmentId, speaker, type } = req.body;
 
-  if (!videoId || !segmentId || !speaker) {
-    return res.status(400).json({ error: 'Missing required parameters (videoId, segmentId, speaker)' });
+  if (!videoId || !segmentId || !speaker || !type) {
+    return res.status(400).json({ error: 'Missing required parameters (videoId, segmentId, speaker, type)' });
   }
 
   const basePath = `https://dqeonmqfumkblxintbbz.supabase.co/storage/v1/object/public/projects/${videoId}/${segmentId}`;
   const audioUrl = `${basePath}/audio.mp3`;
   const slideUrl = `${basePath}/slide.png`;
-  const templateUrl = speaker === 'Mia'
-    ? 'https://dqeonmqfumkblxintbbz.supabase.co/storage/v1/object/public/projects/99_Loop/loop_mia.mp4'
-    : 'https://dqeonmqfumkblxintbbz.supabase.co/storage/v1/object/public/projects/99_Loop/loop_Yu.mp4';
+  const templateUrl = `https://dqeonmqfumkblxintbbz.supabase.co/storage/v1/object/public/projects/99_Loop/${type}/loop_${speaker.toLowerCase()}.mp4`;
 
   res.status(202).json({
     message: 'Conversation video generation started',
@@ -46,7 +44,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       const tmpBase = `/tmp/${videoId}_${segmentId}`;
       const audioPath = `${tmpBase}_audio.mp3`;
       const slidePath = `${tmpBase}_slide.png`;
-      const templatePath = `/tmp/loop_${speaker.toLowerCase()}.mp4`;
+      const templatePath = `/tmp/loop_${type}_${speaker.toLowerCase()}.mp4`;
       const outputPath = `/tmp/${videoId}_${segmentId}.mp4`;
 
       const download = async (url: string, filePath: string) => {
