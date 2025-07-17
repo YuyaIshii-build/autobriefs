@@ -14,6 +14,26 @@ const SUPABASE_URL = process.env.SUPABASE_URL!;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
+// リトライ付きダウンロード関数
+async function downloadWithRetry(url: string, filePath: string, retries = 3, delayMs = 1000): Promise<void> {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`Failed to download ${url}: ${res.status} ${res.statusText}`);
+      const buffer = await res.arrayBuffer();
+      await fs.writeFile(filePath, Buffer.from(buffer));
+      return;
+    } catch (err) {
+      if (attempt < retries) {
+        console.warn(`[downloadWithRetry] Attempt ${attempt} failed for ${url}. Retrying...`);
+        await new Promise(resolve => setTimeout(resolve, delayMs));
+      } else {
+        throw new Error(`[downloadWithRetry] Failed to download after ${retries} attempts: ${url}`);
+      }
+    }
+  }
+}
+
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'POST') {
     res.setHeader('Allow', 'POST');
@@ -51,21 +71,14 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       const templatePath = `/tmp/loop_${type}_${speaker.toLowerCase()}.mp4`;
       const outputPath = `/tmp/${videoId}_${segmentId}.mp4`;
 
-      const download = async (url: string, filePath: string) => {
-        const res = await fetch(url);
-        if (!res.ok) throw new Error(`Failed to download ${url}`);
-        const buffer = await res.arrayBuffer();
-        await fs.writeFile(filePath, Buffer.from(buffer));
-      };
+      // シリアルに音声→スライドをダウンロード（リトライ付き）
+      await downloadWithRetry(audioUrl, audioPath);
+      await downloadWithRetry(slideUrl, slidePath);
 
-      await Promise.all([
-        download(audioUrl, audioPath),
-        download(slideUrl, slidePath),
-      ]);
-
+      // テンプレートがローカルにない場合だけダウンロード
       if (!fsSync.existsSync(templatePath)) {
         console.log(`[generate-convo-video] Downloading template for ${speaker}`);
-        await download(templateUrl, templatePath);
+        await downloadWithRetry(templateUrl, templatePath);
       } else {
         console.log(`[generate-convo-video] Using cached template for ${speaker}`);
       }
