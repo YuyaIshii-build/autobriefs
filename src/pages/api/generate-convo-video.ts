@@ -23,7 +23,7 @@ async function downloadWithRetry(url: string, filePath: string, retries = 3, del
       const buffer = await res.arrayBuffer();
       await fs.writeFile(filePath, Buffer.from(buffer));
       return;
-    } catch (err) {
+    } catch (_err) {
       if (attempt < retries) {
         console.warn(`[downloadWithRetry] Attempt ${attempt} failed for ${url}. Retrying...`);
         await new Promise(resolve => setTimeout(resolve, delayMs));
@@ -123,8 +123,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         fs.unlink(audioPath).catch(() => {}),
         fs.unlink(slidePath).catch(() => {}),
       ]);
-    } catch (err) {
-      console.error('[generate-convo-video] Processing error:', err);
+    } catch (_err) {
+      console.error('[generate-convo-video] Processing error:', _err);
     }
   }, 0);
 }
