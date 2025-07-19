@@ -95,8 +95,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         -i "${templatePath}" \
         -i "${slidePath}" \
         -i "${audioPath}" \
-        -filter_complex "[0:v][1:v] overlay=0:0:enable='between(t,0,${duration})',scale=1280:720" \
-        -map 0:v -map 2:a \
+        -filter_complex "[0:v][1:v] overlay=0:0:enable='between(t,0,${duration})'[v]; [v]scale=1280:720[outv]" \
+        -map "[outv]" -map 2:a \
         -c:v libx264 -preset faster -crf 28 -r 15 \
         -movflags +faststart -c:a aac -b:a 96k -shortest -t ${duration} "${outputPath}"
       `;
