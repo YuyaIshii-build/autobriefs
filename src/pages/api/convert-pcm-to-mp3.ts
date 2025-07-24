@@ -1,7 +1,7 @@
 // pages/api/convert-pcm-to-mp3.ts
 
 import { NextApiRequest, NextApiResponse } from 'next';
-import formidable from 'formidable';
+import formidable, { Fields, Files } from 'formidable';
 import fs from 'fs';
 import path from 'path';
 import { exec } from 'child_process';
@@ -24,15 +24,15 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   const uploadDir = '/tmp';
   const form = formidable({ uploadDir, keepExtensions: true });
 
-  // ファイルを保存
-  const [fields, files] = await new Promise<any>((resolve, reject) => {
+  // 型を明示 & unused変数は_付きにしてESLint回避
+  const [_fields, files]: [Fields, Files] = await new Promise((resolve, reject) => {
     form.parse(req, (err, fields, files) => {
       if (err) reject(err);
       else resolve([fields, files]);
     });
   });
 
-  const pcmFile = files.pcm?.[0]?.filepath || files.file?.[0]?.filepath;
+  const pcmFile = (files.pcm?.[0]?.filepath || files.file?.[0]?.filepath) as string | undefined;
   if (!pcmFile) {
     return res.status(400).json({ error: 'No PCM file uploaded' });
   }
