@@ -1,7 +1,7 @@
 // pages/api/convert-pcm-to-mp3.ts
 
 import { NextApiRequest, NextApiResponse } from 'next';
-import formidable, { Fields, Files } from 'formidable';
+import formidable from 'formidable';
 import fs from 'fs';
 import path from 'path';
 import { exec } from 'child_process';
@@ -24,15 +24,17 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   const uploadDir = '/tmp';
   const form = formidable({ uploadDir, keepExtensions: true });
 
-  // 型を明示 & unused変数は_付きにしてESLint回避
-  const [_fields, files]: [Fields, Files] = await new Promise((resolve, reject) => {
-    form.parse(req, (err, fields, files) => {
+  // ファイルだけを取得（fieldsは不要なので無視）
+  const files = await new Promise<formidable.Files>((resolve, reject) => {
+    form.parse(req, (err, _fields, files) => {
       if (err) reject(err);
-      else resolve([fields, files]);
+      else resolve(files);
     });
   });
 
-  const pcmFile = (files.pcm?.[0]?.filepath || files.file?.[0]?.filepath) as string | undefined;
+  const pcmFile = Array.isArray(files.pcm) ? files.pcm[0].filepath : files.pcm?.filepath
+    || Array.isArray(files.file) ? files.file[0].filepath : files.file?.filepath;
+
   if (!pcmFile) {
     return res.status(400).json({ error: 'No PCM file uploaded' });
   }
@@ -42,7 +44,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   try {
     // ffmpegでPCMからMP3へ変換（24kHz, mono）
     await execAsync(
-      `ffmpeg -f s16le -ar 24000 -ac 1 -i ${pcmFile} -codec:a libmp3lame -qscale:a 2 ${mp3Path}`
+      `ffmpeg -f s16le -ar 24000 -ac 1 -i "${pcmFile}" -codec:a libmp3lame -qscale:a 2 "${mp3Path}"`
     );
 
     const mp3Buffer = fs.readFileSync(mp3Path);
