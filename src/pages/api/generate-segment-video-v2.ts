@@ -4,7 +4,6 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import { exec } from 'child_process';
 import util from 'util';
 import fs from 'fs/promises';
-import fsSync from 'fs';
 import fetch from 'node-fetch';
 import { createClient } from '@supabase/supabase-js';
 
