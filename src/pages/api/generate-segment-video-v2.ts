@@ -1,5 +1,3 @@
-// pages/api/generate-segment-video-v2.ts
-
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { exec } from 'child_process';
 import util from 'util';
@@ -31,7 +29,7 @@ async function downloadWithRetry(
       const buffer = await res.arrayBuffer();
       await fs.writeFile(filePath, Buffer.from(buffer));
       return;
-    } catch (err) {
+    } catch {
       if (attempt === retries) {
         throw new Error(`Failed to download ${url}`);
       }
@@ -134,9 +132,7 @@ export default async function handler(
       `;
 
       await execAsync(ffmpegCmd);
-      console.log(
-        `[segment-video-v2] Created ${tmpOutputVideo}`
-      );
+      console.log(`[segment-video-v2] Created ${tmpOutputVideo}`);
 
       /* -----------------------------
          done.txt upload
@@ -167,8 +163,8 @@ export default async function handler(
       console.log(
         `[segment-video-v2] Completed ${videoId}/${segmentId}`
       );
-    } catch (err) {
-      console.error('[segment-video-v2] Error:', err);
+    } catch {
+      console.error('[segment-video-v2] Unexpected error occurred');
     }
   });
 }
