@@ -8,10 +8,7 @@ const SUPABASE_URL = process.env.SUPABASE_URL!;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-export default async function handler(
-  req: NextApiRequest,
-  res: NextApiResponse
-) {
+export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
     const { html, videoId, segmentId } = req.body as {
       html?: string;
@@ -29,31 +26,26 @@ export default async function handler(
       return res.status(400).json({ error: 'Missing videoId or segmentId' });
     }
 
-    // ✅ 即レスポンス
+    // ✅ 即レスポンス返す
     res.status(202).json({
       message: 'Rendering started',
       videoId,
       segmentId,
     });
 
-    // 🧵 非同期処理
+    // 🧵 非同期処理スタート
     setImmediate(async () => {
       const maxAttempts = 3;
 
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
-          console.log(`🔁 Segment slide rendering attempt ${attempt}`);
-          await renderSlide(html, videoId, segmentId, attempt);
-          console.log('✅ Segment slide rendering succeeded');
+          console.log(`🔁 Puppeteer rendering attempt ${attempt}`);
+          await renderSlide(html, videoId, segmentId);
+          console.log('✅ Rendering succeeded');
           break;
         } catch (error) {
-          const message =
-            error instanceof Error ? error.message : String(error);
-          console.error(
-            `❌ Segment slide rendering failed (attempt ${attempt}):`,
-            message
-          );
-
+          const message = error instanceof Error ? error.message : String(error);
+          console.error(`❌ Rendering failed (attempt ${attempt}):`, message);
           if (attempt === maxAttempts) {
             console.error('🛑 Giving up after 3 attempts');
           } else {
@@ -63,25 +55,15 @@ export default async function handler(
         }
       }
     });
+
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error('❌ API entry error:', message);
-    return res.status(500).json({
-      error: 'Internal Server Error',
-      details: message,
-    });
+    return res.status(500).json({ error: 'Internal Server Error', details: message });
   }
 }
 
-async function renderSlide(
-  html: string,
-  videoId: string,
-  segmentId: string,
-  attempt: number
-) {
-  // ✅ attempt / video / segment 単位で完全分離
-  const userDataDir = `/tmp/puppeteer_segment_${videoId}_${segmentId}_attempt_${attempt}`;
-
+async function renderSlide(html: string, videoId: string, segmentId: string) {
   const browser = await puppeteer.launch({
     headless: true,
     args: [
@@ -90,16 +72,13 @@ async function renderSlide(
       '--disable-dev-shm-usage',
       '--single-process',
       '--no-zygote',
-      `--user-data-dir=${userDataDir}`,
+      `--user-data-dir=/tmp/puppeteer_user_data`,
     ],
   });
 
   const page = await browser.newPage();
   await page.setViewport({ width: 1920, height: 1080 });
-
-  await page.setContent(html, {
-    waitUntil: 'networkidle0',
-  });
+  await page.setContent(html, { waitUntil: 'networkidle0' });
 
   const imageBuffer = await page.screenshot({
     type: 'png',
@@ -122,5 +101,5 @@ async function renderSlide(
     throw new Error(`Upload failed: ${uploadError.message}`);
   }
 
-  console.log('✅ Segment slide upload succeeded:', filePath);
+  console.log('✅ Upload succeeded:', filePath);
 }
