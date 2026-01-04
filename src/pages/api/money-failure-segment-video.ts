@@ -3,8 +3,13 @@ import { exec } from 'child_process';
 import util from 'util';
 import fs from 'fs/promises';
 import fetch from 'node-fetch';
+import { createClient } from '@supabase/supabase-js';
 
 const execAsync = util.promisify(exec);
+
+const SUPABASE_URL = process.env.SUPABASE_URL!;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 /* -----------------------------
    Utility: download with retry
@@ -53,7 +58,7 @@ export default async function handler(
     });
   }
 
-  // 即レスポンス（ジョブ受付のみ）
+  // 即レスポンス
   res.status(202).json({
     message: 'Money-failure segment video generation started',
     videoId,
@@ -64,36 +69,31 @@ export default async function handler(
   setImmediate(async () => {
     try {
       console.log(
-        `[money-failure-segment] Start ${videoId} / ${segmentId}`
+        `[money-failure-segment-video] Start ${videoId} / ${segmentId}`
       );
 
       /* -----------------------------
          Paths
       ------------------------------ */
       const basePublic =
-        `${process.env.SUPABASE_URL}/storage/v1/object/public/projects`;
+        `${SUPABASE_URL}/storage/v1/object/public/projects`;
 
       const audioUrl =
         `${basePublic}/${videoId}/${segmentId}/audio.mp3`;
 
-      const segmentPngUrl =
-        `${basePublic}/${videoId}/${segmentId}/segment.png`;
+      const segmentSlideUrl =
+        `${basePublic}/${videoId}/${segmentId}/slide.png`;
 
-      // tmp（シリーズ衝突を避けるため prefix 明示）
-      const tmpAudio =
-        `/tmp/money_failure_${videoId}_${segmentId}_audio.mp3`;
-
-      const tmpSegmentPng =
-        `/tmp/money_failure_${videoId}_${segmentId}_segment.png`;
-
-      const tmpOutputVideo =
-        `/tmp/money_failure_${videoId}_${segmentId}.mp4`;
+      // ローカル一時ファイル（既存と絶対に被らない命名）
+      const tmpAudio = `/tmp/${videoId}_${segmentId}_audio.mp3`;
+      const tmpSegmentSlide = `/tmp/${videoId}_${segmentId}_segment.png`;
+      const tmpOutputVideo = `/tmp/${videoId}_${segmentId}_segment.mp4`;
 
       /* -----------------------------
-         Download assets
+         Download assets (serial)
       ------------------------------ */
       await downloadWithRetry(audioUrl, tmpAudio);
-      await downloadWithRetry(segmentPngUrl, tmpSegmentPng);
+      await downloadWithRetry(segmentSlideUrl, tmpSegmentSlide);
 
       /* -----------------------------
          Get audio duration
@@ -108,14 +108,14 @@ export default async function handler(
       }
 
       /* -----------------------------
-         ffmpeg: static png + audio
+         ffmpeg: slide + audio
       ------------------------------ */
       const ffmpegCmd = `
         ffmpeg -y \
-          -loop 1 -i "${tmpSegmentPng}" \
+          -loop 1 -i "${tmpSegmentSlide}" \
           -i "${tmpAudio}" \
-          -t ${duration} \
           -map 0:v -map 1:a \
+          -t ${duration} \
           -c:v libx264 -preset faster -crf 28 -r 15 \
           -pix_fmt yuv420p \
           -c:a aac -b:a 96k \
@@ -124,26 +124,41 @@ export default async function handler(
       `;
 
       await execAsync(ffmpegCmd);
-
       console.log(
-        `[money-failure-segment] Created ${tmpOutputVideo}`
+        `[money-failure-segment-video] Created ${tmpOutputVideo}`
       );
+
+      /* -----------------------------
+         done.txt upload
+      ------------------------------ */
+      const donePath = `${videoId}/${segmentId}/done.txt`;
+
+      const { error: doneErr } = await supabase.storage
+        .from('projects')
+        .upload(donePath, Buffer.from('done'), {
+          upsert: true,
+          contentType: 'text/plain',
+          cacheControl: 'no-cache',
+        });
+
+      if (doneErr) {
+        throw new Error(`done.txt upload failed: ${doneErr.message}`);
+      }
 
       /* -----------------------------
          Cleanup (leave mp4!)
       ------------------------------ */
       await Promise.all([
         fs.unlink(tmpAudio).catch(() => {}),
-        fs.unlink(tmpSegmentPng).catch(() => {}),
+        fs.unlink(tmpSegmentSlide).catch(() => {}),
       ]);
 
       console.log(
-        `[money-failure-segment] Completed ${videoId} / ${segmentId}`
+        `[money-failure-segment-video] Completed ${videoId}/${segmentId}`
       );
-    } catch (err) {
+    } catch {
       console.error(
-        `[money-failure-segment] Failed ${videoId} / ${segmentId}`,
-        err
+        '[money-failure-segment-video] Unexpected error occurred'
       );
     }
   });
