@@ -112,7 +112,7 @@ export default async function handler(
         -i "${tmpFinalVideo}" \
         -filter_complex "
           [0:v]scale=1920:1080[bg];
-          [1:v]scale=1280:720[fg];
+          [1:v]scale=1600:900[fg];
           [bg][fg]overlay=(W-w)/2:(H-h)/2
         " \
         -map 1:a? \
