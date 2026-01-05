@@ -119,7 +119,7 @@ export default async function handler(
         -i "${tmpVideo}" \
         -stream_loop -1 -i "${tmpBgm}" \
         -filter_complex "
-          [1:a]volume=0.15,afade=t=out:st=${fadeStart}:d=10[bgm];
+          [1:a]volume=0.25,afade=t=out:st=${fadeStart}:d=10[bgm];
           [0:a][bgm]amix=inputs=2:dropout_transition=0[a]
         " \
         -map 0:v \
