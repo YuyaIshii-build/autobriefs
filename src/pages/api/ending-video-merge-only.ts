@@ -11,8 +11,6 @@ const execAsync = util.promisify(exec);
 const ENDING_URL =
   'https://dqeonmqfumkblxintbbz.supabase.co/storage/v1/object/public/projects/99_Template/03_Ending/MoneyFailure.mp4';
 
-const FADE_DURATION = 0.7;
-
 /* -----------------------------
    Utils
 ------------------------------ */
@@ -32,6 +30,8 @@ async function fileExists(p: string) {
     return false;
   }
 }
+
+const escapePath = (p: string) => p.replace(/'/g, "'\\''");
 
 /* -----------------------------
    API
@@ -76,28 +76,28 @@ export default async function handler(
     }
 
     /* -----------------------------
-       Merge with fade (video + audio)
+       Concat main + ending
     ------------------------------ */
 
+    const listPath = `/tmp/${videoId}_ending_list.txt`;
     const tmpOutput = `/tmp/${videoId}_with_ending.mp4`;
+
+    const listContent =
+      `file '${escapePath(tmpMainVideo)}'\n` +
+      `file '${escapePath(tmpEndingVideo)}'\n`;
+
+    await fs.writeFile(listPath, listContent);
 
     const cmd = `
       ffmpeg -y \
-        -i "${tmpMainVideo}" \
-        -i "${tmpEndingVideo}" \
-        -filter_complex "
-          [0:v][1:v]xfade=transition=fade:duration=${FADE_DURATION}:offset=0[v];
-          [0:a][1:a]acrossfade=d=${FADE_DURATION}[a]
-        " \
-        -map "[v]" -map "[a]" \
-        -c:v libx264 -preset faster -crf 28 -r 15 \
-        -c:a aac -b:a 128k \
-        -pix_fmt yuv420p \
+        -f concat -safe 0 \
+        -i "${listPath}" \
+        -c copy \
         -movflags +faststart \
         "${tmpOutput}"
     `;
 
-    console.log('🎞 Running ffmpeg merge with fade');
+    console.log('🎞 Running ffmpeg concat (main + ending)');
     await execAsync(cmd);
 
     /* -----------------------------
@@ -105,14 +105,14 @@ export default async function handler(
     ------------------------------ */
 
     await fs.rename(tmpOutput, tmpMainVideo);
+    await fs.unlink(listPath).catch(() => {});
 
-    console.log('✅ Ending merge with fade completed');
+    console.log('✅ Ending merge completed');
 
     return res.status(200).json({
-      message: 'Ending video merged with fade',
+      message: 'Ending video merged',
       videoId,
       outputPath: tmpMainVideo,
-      fadeDuration: FADE_DURATION,
     });
   } catch (e) {
     console.error('❌ ending-video-merge error', e);
