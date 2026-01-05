@@ -5,7 +5,6 @@ import { exec } from 'child_process';
 import util from 'util';
 import fs from 'fs/promises';
 import fetch from 'node-fetch';
-import path from 'path';
 
 const execAsync = util.promisify(exec);
 
