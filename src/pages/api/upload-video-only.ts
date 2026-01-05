@@ -74,9 +74,13 @@ export default async function handler(
     ------------------------------ */
     const files = await fs.readdir(tmpDir);
 
-    const relatedFiles = files.filter((f) =>
-      f.startsWith(videoId)
-    );
+    await Promise.all(
+      files.map((f) =>
+        fs.unlink(path.join(tmpDir, f)).catch(() => {})
+        )
+      );
+
+    console.log('🧹 Cleanup completed: tmp fully cleared');
 
     await Promise.all(
       relatedFiles.map((f) =>
