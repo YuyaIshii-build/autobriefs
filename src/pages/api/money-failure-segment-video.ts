@@ -2,7 +2,6 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import { exec } from 'child_process';
 import util from 'util';
 import fs from 'fs/promises';
-import fsSync from 'fs';
 import fetch from 'node-fetch';
 import { createClient } from '@supabase/supabase-js';
 
@@ -61,7 +60,7 @@ export default async function handler(
 
   // 即レスポンス
   res.status(202).json({
-    message: 'Money failure segment video generation started',
+    message: 'Money-failure segment video generation started',
     videoId,
     segmentId,
   });
@@ -85,45 +84,10 @@ export default async function handler(
       const segmentSlideUrl =
         `${basePublic}/${videoId}/${segmentId}/slide.png`;
 
-      // 背景ループ動画（videoId 単位で固定）
-      const backgroundPool = [
-        '001.mp4',
-        '002.mp4',
-        '003.mp4',
-        '004.mp4',
-        '005.mp4',
-        '006.mp4',
-        '007.mp4',
-      ];
-
-      const backgroundCachePath =
-        `/tmp/${videoId}_money_failure_bg.mp4`;
-
-      // ローカル一時ファイル
+      // ローカル一時ファイル（既存と絶対に被らない命名）
       const tmpAudio = `/tmp/${videoId}_${segmentId}_audio.mp3`;
       const tmpSegmentSlide = `/tmp/${videoId}_${segmentId}_segment.png`;
       const tmpOutputVideo = `/tmp/${videoId}_${segmentId}_segment.mp4`;
-
-      /* -----------------------------
-         Download background (once per video)
-      ------------------------------ */
-      if (!fsSync.existsSync(backgroundCachePath)) {
-        const picked =
-          backgroundPool[Math.floor(Math.random() * backgroundPool.length)];
-
-        const backgroundUrl =
-          `${basePublic}/99_Loop/02_MoneyFailure/${picked}`;
-
-        console.log(
-          `[money-failure-segment-video] Pick background ${picked}`
-        );
-
-        await downloadWithRetry(backgroundUrl, backgroundCachePath);
-      } else {
-        console.log(
-          `[money-failure-segment-video] Use cached background`
-        );
-      }
 
       /* -----------------------------
          Download assets (serial)
@@ -144,15 +108,13 @@ export default async function handler(
       }
 
       /* -----------------------------
-         ffmpeg: background + segment + audio
+         ffmpeg: slide + audio
       ------------------------------ */
       const ffmpegCmd = `
         ffmpeg -y \
-          -stream_loop -1 -i "${backgroundCachePath}" \
-          -i "${tmpSegmentSlide}" \
+          -loop 1 -i "${tmpSegmentSlide}" \
           -i "${tmpAudio}" \
-          -filter_complex "[0:v][1:v] overlay=0:0:format=auto [v]" \
-          -map "[v]" -map 2:a \
+          -map 0:v -map 1:a \
           -t ${duration} \
           -c:v libx264 -preset faster -crf 28 -r 15 \
           -pix_fmt yuv420p \
@@ -194,10 +156,9 @@ export default async function handler(
       console.log(
         `[money-failure-segment-video] Completed ${videoId}/${segmentId}`
       );
-    } catch (err) {
+    } catch {
       console.error(
-        '[money-failure-segment-video] Unexpected error occurred',
-        err
+        '[money-failure-segment-video] Unexpected error occurred'
       );
     }
   });
