@@ -19,7 +19,6 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
 }
 
 const escapePath = (p: string) => p.replace(/'/g, "'\\''");
-
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function waitForFileAccessible(filePath: string, retries = 10, interval = 100) {
@@ -57,17 +56,21 @@ async function validateFileReady(filePath: string, retries = 10, interval = 2000
 async function runFfmpegWithRetry(cmd: string, cwd: string, outputFilePath?: string) {
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      const { stdout, stderr } = await execAsync(cmd, { cwd });
+      console.log(`▶️ [ffmpeg] attempt ${attempt}`);
+      await execAsync(cmd, { cwd });
+
       if (outputFilePath) {
         await waitForFileAccessible(outputFilePath, 10, 200);
       }
-      return { stdout, stderr };
+
+      console.log(`✅ [ffmpeg] success`);
+      return;
     } catch (e) {
+      console.warn(`⚠️ [ffmpeg] failed attempt ${attempt}`);
       if (attempt === 3) throw e;
       await sleep(10000);
     }
   }
-  throw new Error('ffmpeg failed after retries');
 }
 
 /* -----------------------------
@@ -76,6 +79,8 @@ async function runFfmpegWithRetry(cmd: string, cwd: string, outputFilePath?: str
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
+    console.log('🚀 concat-videos-only START');
+
     if (req.method !== 'POST') {
       res.setHeader('Allow', 'POST');
       return res.status(405).json({ error: 'Method not allowed' });
@@ -85,6 +90,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     if (!videoId) {
       return res.status(400).json({ error: 'Missing videoId in request body' });
     }
+
+    console.log(`🎬 videoId = ${videoId}`);
 
     const tmpDir = '/tmp';
     const files = await fs.readdir(tmpDir);
@@ -100,18 +107,25 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       })
       .map(f => path.join(tmpDir, f));
 
+    console.log(`🧩 Found ${videoFiles.length} segment files`);
+
     if (videoFiles.length === 0) {
       return res.status(400).json({ error: 'No video segment files found' });
     }
 
     for (const f of videoFiles) {
+      console.log(`⏳ validating ${path.basename(f)}`);
       await validateFileReady(f);
     }
 
     const chunks = chunkArray(videoFiles, 30);
+    console.log(`📦 Split into ${chunks.length} chunk(s)`);
+
     const intermediateFiles: string[] = [];
 
     for (let i = 0; i < chunks.length; i++) {
+      console.log(`🔗 Processing chunk ${i + 1}/${chunks.length}`);
+
       const chunk = chunks[i];
       const listPath = path.join(tmpDir, `${videoId}_chunk_${i}.txt`);
       const outputPath = path.join(tmpDir, `${videoId}_chunk_${i}.mp4`);
@@ -123,7 +137,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       const cmd = `ffmpeg -y -f concat -safe 0 -i "${listPath}" -c copy -movflags +faststart "${outputPath}"`;
       await runFfmpegWithRetry(cmd, tmpDir, outputPath);
 
+      console.log(`✅ Chunk ${i + 1} completed`);
       intermediateFiles.push(outputPath);
+
       await fs.unlink(listPath).catch(() => {});
       await sleep(5000);
     }
@@ -131,6 +147,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     for (const f of intermediateFiles) {
       await validateFileReady(f);
     }
+
+    console.log('🎞 Final concat start');
 
     const finalListPath = path.join(tmpDir, `${videoId}_final_list.txt`);
     const finalOutput = path.join(tmpDir, `${videoId}.mp4`);
@@ -143,14 +161,21 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const finalCmd = `ffmpeg -y -f concat -safe 0 -i "${finalListPath}" -c copy -movflags +faststart "${finalOutput}"`;
     await runFfmpegWithRetry(finalCmd, tmpDir, finalOutput);
 
+    console.log(`🎉 Final video created: ${finalOutput}`);
+
     /* -----------------------------
        Cleanup（最終動画以外）
     ------------------------------ */
+    console.log('🧹 Cleanup start');
+
     await Promise.all([
       ...videoFiles.map(f => fs.unlink(f).catch(() => {})),
       ...intermediateFiles.map(f => fs.unlink(f).catch(() => {})),
       fs.unlink(finalListPath).catch(() => {}),
     ]);
+
+    console.log('✅ Cleanup completed');
+    console.log('🏁 concat-videos-only DONE');
 
     return res.status(200).json({
       message: 'Videos concatenated successfully',
