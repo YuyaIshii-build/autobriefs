@@ -13,7 +13,11 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
    Utilities（最小限）
 ------------------------------ */
 
-async function waitForFileAccessible(filePath: string, retries = 10, interval = 500) {
+async function waitForFileAccessible(
+  filePath: string,
+  retries = 10,
+  interval = 500
+) {
   for (let i = 0; i < retries; i++) {
     try {
       await fs.access(filePath);
@@ -72,23 +76,16 @@ export default async function handler(
     /* -----------------------------
        Cleanup（tmp 全掃除）
     ------------------------------ */
+
     const files = await fs.readdir(tmpDir);
 
     await Promise.all(
       files.map((f) =>
         fs.unlink(path.join(tmpDir, f)).catch(() => {})
-        )
-      );
-
-    console.log('🧹 Cleanup completed: tmp fully cleared');
-
-    await Promise.all(
-      relatedFiles.map((f) =>
-        fs.unlink(path.join(tmpDir, f)).catch(() => {})
       )
     );
 
-    console.log(`🧹 Cleanup completed for videoId=${videoId}`);
+    console.log('🧹 Cleanup completed: tmp fully cleared');
 
     return res.status(200).json({
       message: 'Video uploaded successfully',
