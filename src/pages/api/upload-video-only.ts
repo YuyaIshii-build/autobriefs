@@ -4,13 +4,25 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import fs from 'fs/promises';
 import path from 'path';
 import { createClient } from '@supabase/supabase-js';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+
+const execAsync = promisify(exec);
 
 const SUPABASE_URL = process.env.SUPABASE_URL!;
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 /* -----------------------------
-   Utilities（最小限）
+   Constants
+------------------------------ */
+
+const TMP_DIR = '/tmp';
+const MAX_ATTEMPTS = 5;
+const SAFE_UPLOAD_BYTES = 47 * 1024 * 1024; // 47MB safety buffer
+
+/* -----------------------------
+   Utilities
 ------------------------------ */
 
 async function waitForFileAccessible(
@@ -29,8 +41,51 @@ async function waitForFileAccessible(
   throw new Error(`File ${filePath} not accessible after ${retries} retries`);
 }
 
+async function getFileSize(filePath: string): Promise<number> {
+  const stat = await fs.stat(filePath);
+  return stat.size;
+}
+
+function getCompressionParams(attempt: number) {
+  switch (attempt) {
+    case 1:
+      return { crf: 28, preset: 'fast', audio: '128k' };
+    case 2:
+      return { crf: 30, preset: 'fast', audio: '128k' };
+    case 3:
+      return { crf: 32, preset: 'fast', audio: '96k' };
+    case 4:
+      return { crf: 34, preset: 'veryfast', audio: '96k' };
+    default:
+      return { crf: 36, preset: 'veryfast', audio: '64k' };
+  }
+}
+
+async function recompressVideo(
+  inputPath: string,
+  outputPath: string,
+  attempt: number
+) {
+  const { crf, preset, audio } = getCompressionParams(attempt);
+
+  console.log(
+    `🎞 Recompress attempt ${attempt}: crf=${crf}, preset=${preset}, audio=${audio}`
+  );
+
+  const cmd = `
+    ffmpeg -y \
+      -i "${inputPath}" \
+      -c:v libx264 -preset ${preset} -crf ${crf} \
+      -c:a aac -b:a ${audio} \
+      -movflags +faststart \
+      "${outputPath}"
+  `;
+
+  await execAsync(cmd);
+}
+
 /* -----------------------------
-   API Handler（upload-only）
+   API Handler
 ------------------------------ */
 
 export default async function handler(
@@ -48,15 +103,48 @@ export default async function handler(
       return res.status(400).json({ error: 'Missing videoId in request body' });
     }
 
-    const tmpDir = '/tmp';
-    const finalVideoPath = path.join(tmpDir, `${videoId}.mp4`);
+    const originalPath = path.join(TMP_DIR, `${videoId}.mp4`);
 
-    // 最終動画の存在確認
-    await waitForFileAccessible(finalVideoPath);
+    await waitForFileAccessible(originalPath);
 
-    console.log(`⬆️ Uploading video: ${finalVideoPath}`);
+    let currentPath = originalPath;
+    let attempt = 0;
 
-    const videoBuffer = await fs.readFile(finalVideoPath);
+    while (attempt < MAX_ATTEMPTS) {
+      const size = await getFileSize(currentPath);
+      console.log(`📦 Current video size: ${(size / 1024 / 1024).toFixed(2)} MB`);
+
+      if (size <= SAFE_UPLOAD_BYTES) {
+        console.log('✅ Size is within upload limit');
+        break;
+      }
+
+      attempt++;
+      if (attempt > MAX_ATTEMPTS) break;
+
+      const compressedPath = path.join(
+        TMP_DIR,
+        `${videoId}_compressed_${attempt}.mp4`
+      );
+
+      await recompressVideo(currentPath, compressedPath, attempt);
+      currentPath = compressedPath;
+    }
+
+    const finalSize = await getFileSize(currentPath);
+    if (finalSize > SAFE_UPLOAD_BYTES) {
+      throw new Error(
+        `Video still too large after ${MAX_ATTEMPTS} compression attempts`
+      );
+    }
+
+    console.log(
+      `⬆️ Uploading final video (${(finalSize / 1024 / 1024).toFixed(
+        2
+      )} MB)`
+    );
+
+    const videoBuffer = await fs.readFile(currentPath);
 
     const uploadPath = `${videoId}/${videoId}.mp4`;
     const { error: uploadError } = await supabase.storage
@@ -74,15 +162,12 @@ export default async function handler(
     console.log(`✅ Upload complete: ${uploadPath}`);
 
     /* -----------------------------
-       Cleanup（tmp 全掃除）
+       Cleanup
     ------------------------------ */
 
-    const files = await fs.readdir(tmpDir);
-
+    const files = await fs.readdir(TMP_DIR);
     await Promise.all(
-      files.map((f) =>
-        fs.unlink(path.join(tmpDir, f)).catch(() => {})
-      )
+      files.map((f) => fs.unlink(path.join(TMP_DIR, f)).catch(() => {}))
     );
 
     console.log('🧹 Cleanup completed: tmp fully cleared');
