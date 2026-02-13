@@ -126,6 +126,23 @@ export default function Home() {
           </div>
         </nav>
 
+        {/* YouTube チャンネル */}
+        <a
+          href="https://www.youtube.com/channel/UCSxL2p6ktQeIkX45yg5BnHw"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="mt-8 flex items-center gap-4 p-4 rounded-xl bg-[#0f0f0f] text-white hover:bg-[#272727] transition-colors group"
+        >
+          <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-[#ff0000] text-2xl" aria-hidden>
+            ▶
+          </span>
+          <div className="min-w-0 flex-1">
+            <p className="font-semibold text-white group-hover:text-[#ff0000] transition-colors">YouTube チャンネル</p>
+            <p className="text-sm text-gray-400 truncate">投資情報を整理する</p>
+          </div>
+          <span className="shrink-0 text-gray-500 group-hover:text-white transition-colors" aria-hidden>→</span>
+        </a>
+
         {/* フッター */}
         <footer className="mt-16 pt-6 border-t border-gray-200 text-center text-sm text-gray-500">
           <p>AutoBriefs — 解説動画の生成は送信後、バックグラウンドで処理されます。</p>
