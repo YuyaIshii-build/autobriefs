@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import Link from 'next/link';
 import InputForm from '@/components/InputForm';
 
 export default function StructureThemePage() {
@@ -39,7 +40,10 @@ export default function StructureThemePage() {
 
   return (
     <div className="p-6 max-w-xl mx-auto">
-      <h1 className="text-2xl font-bold mb-2">🧠 業界構造テーマ入力</h1>
+      <Link href="/" className="inline-flex items-center gap-1 text-sm text-gray-600 hover:text-gray-900 mb-4">
+        ← ホームへ戻る
+      </Link>
+      <h1 className="text-2xl font-bold mb-2">🧠 業界構造解説動画の生成</h1>
       <p className="text-sm text-gray-600 mb-4">
         業界定義・構造的切り口・影響整理（THEME_TEXT）をそのまま貼り付けてください
       </p>

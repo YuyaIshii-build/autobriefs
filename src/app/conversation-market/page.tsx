@@ -3,7 +3,8 @@
 'use client';
 
 import { useState } from 'react';
-import InputForm from '@/components/InputForm'; // 既存のフォームを流用（topic + videoId）
+import Link from 'next/link';
+import InputForm from '@/components/InputForm';
 
 export default function ConversationMarketPage() {
   const [message, setMessage] = useState('');
@@ -40,7 +41,10 @@ export default function ConversationMarketPage() {
 
   return (
     <div className="p-6 max-w-xl mx-auto">
-      <h1 className="text-2xl font-bold mb-2">📈 毎日 市場解説（定点観測）入力</h1>
+      <Link href="/" className="inline-flex items-center gap-1 text-sm text-gray-600 hover:text-gray-900 mb-4">
+        ← ホームへ戻る
+      </Link>
+      <h1 className="text-2xl font-bold mb-2">📈 デイリー東京市場の解説動画の生成</h1>
       <p className="text-sm text-gray-600 mb-4">
         日経オンラインの市況まとめ記事（本文）を貼り付けて送信してください。
         <br />

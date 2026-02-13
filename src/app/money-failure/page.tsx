@@ -3,7 +3,8 @@
 'use client';
 
 import { useState } from 'react';
-import InputForm from '@/components/InputForm'; // ← src/components からのimport
+import Link from 'next/link';
+import InputForm from '@/components/InputForm';
 
 export default function  MarketArticlePage() {
   const [message, setMessage] = useState('');
@@ -35,6 +36,9 @@ export default function  MarketArticlePage() {
 
   return (
     <div className="p-6 max-w-xl mx-auto">
+      <Link href="/" className="inline-flex items-center gap-1 text-sm text-gray-600 hover:text-gray-900 mb-4">
+        ← ホームへ戻る
+      </Link>
       <h1 className="text-2xl font-bold mb-4">🗣 お金の失敗ストーリー動画生成</h1>
 
       <InputForm onSubmit={handleSubmit} />
