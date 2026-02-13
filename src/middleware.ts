@@ -28,11 +28,12 @@ export function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
-  // 静的ファイル・Next 内部はスキップ
+  // 静的ファイル・Next 内部・API はスキップ（n8n 等から API 呼び出しするため認証不要）
   const pathname = request.nextUrl.pathname;
   if (
     pathname.startsWith('/_next') ||
     pathname.startsWith('/favicon') ||
+    pathname.startsWith('/api/') ||
     pathname.includes('.')
   ) {
     return NextResponse.next();
