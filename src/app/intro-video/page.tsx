@@ -1,9 +1,10 @@
 'use client';
 
 import { useState } from 'react';
-import Link from 'next/link';
+
 import InputForm from '@/components/InputForm';
 import SuggestionsDisplay from '@/components/SuggestionsDisplay';
+import LegacyToolShell from '@/components/service/LegacyToolShell';
 
 export default function IntroVideoPage() {
   const [titles, setTitles] = useState<string[]>([]);
@@ -34,23 +35,10 @@ export default function IntroVideoPage() {
   };
 
   return (
-    <main className="min-h-screen bg-gray-100 p-6">
-      <div className="max-w-3xl mx-auto">
-        <Link
-          href="/"
-          className="inline-flex items-center gap-1 text-sm text-gray-600 hover:text-gray-900 mb-4"
-        >
-          ← ホームへ戻る
-        </Link>
-        <h1 className="text-2xl font-bold mb-4">AutoBriefs - ニュース解説動画作成</h1>
-        <InputForm onSubmit={handleNewsSubmit} />
-
-        <SuggestionsDisplay
-          titles={titles}
-          descriptions={descriptions}
-          thumbnails={thumbnails}
-        />
-      </div>
-    </main>
+    <LegacyToolShell title="イントロ動画">
+      <h1 className="text-2xl font-bold mb-4 text-slate-900">ニュース解説動画作成（イントロ）</h1>
+      <InputForm onSubmit={handleNewsSubmit} />
+      <SuggestionsDisplay titles={titles} descriptions={descriptions} thumbnails={thumbnails} />
+    </LegacyToolShell>
   );
 }

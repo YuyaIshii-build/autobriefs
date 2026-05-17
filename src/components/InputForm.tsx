@@ -53,7 +53,7 @@ export default function InputForm({ onSubmit }: Props) {
       <button
         type="submit"
         disabled={loading}
-        className={`px-4 py-2 rounded text-white ${loading ? 'bg-gray-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'}`}
+        className="btn-primary"
       >
         {loading ? '生成中' : '動画生成'}
       </button>

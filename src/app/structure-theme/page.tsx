@@ -1,8 +1,9 @@
 'use client';
 
 import { useState } from 'react';
-import Link from 'next/link';
+
 import InputForm from '@/components/InputForm';
+import LegacyToolShell from '@/components/service/LegacyToolShell';
 
 export default function StructureThemePage() {
   const [message, setMessage] = useState('');
@@ -39,19 +40,14 @@ export default function StructureThemePage() {
   };
 
   return (
-    <div className="p-6 max-w-xl mx-auto">
-      <Link href="/" className="inline-flex items-center gap-1 text-sm text-gray-600 hover:text-gray-900 mb-4">
-        ← ホームへ戻る
-      </Link>
-      <h1 className="text-2xl font-bold mb-2">🧠 業界構造解説動画の生成</h1>
-      <p className="text-sm text-gray-600 mb-4">
+    <LegacyToolShell title="業界構造解説">
+      <h1 className="text-2xl font-bold mb-2 text-slate-900">業界構造解説動画の生成</h1>
+      <p className="text-sm text-slate-600 mb-4">
         業界定義・構造的切り口・影響整理（THEME_TEXT）をそのまま貼り付けてください
       </p>
-
       <InputForm onSubmit={handleSubmit} />
-
-      {loading && <p className="mt-4 text-gray-600">送信中です…</p>}
-      {message && <p className="mt-4">{message}</p>}
-    </div>
+      {loading && <p className="mt-4 text-slate-600">送信中です…</p>}
+      {message && <p className="mt-4 text-slate-800">{message}</p>}
+    </LegacyToolShell>
   );
 }

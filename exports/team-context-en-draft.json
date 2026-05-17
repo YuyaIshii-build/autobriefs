@@ -1,0 +1,24 @@
+{
+  "exported_at": "2026-05-17T08:00:00.000Z",
+  "source": "draft_from_jp_team_context",
+  "status": "draft_not_in_db",
+  "derived_from": {
+    "jp_team_context_id": "8fa2cb7d-0334-482a-baea-c5b069bb39d4",
+    "jp_name": "AI・DX戦略提案チーム",
+    "jp_exported_at": "2026-05-17T08:00:00.000Z"
+  },
+  "intended_use": "Business News Brief EN demos — enterprise AI/DX proposal preparation",
+  "team_context": {
+    "id": "463adde8-f01b-4098-8ae8-76882d9a5ecf",
+    "workspace_id": null,
+    "name": "AI & DX Strategy Team",
+    "company_summary": "Enterprise technology consulting and systems integration firm helping large organizations adopt AI, modernize operations, and build cloud and data platforms.\n\nThe firm works across manufacturing, logistics, retail, and financial services on business transformation, generative AI use cases, integration programs, and data foundation initiatives.",
+    "target_industries": "Generative AI, cloud platforms, enterprise software, manufacturing transformation, logistics and supply chain technology",
+    "customers": "IT leaders, architecture teams, and business strategy groups at large manufacturers, logistics operators, retailers, and financial institutions",
+    "competitors": "Accenture, NTT DATA, Fujitsu, Hitachi, IBM, and major AWS ecosystem partners",
+    "team_role": "Prepares market, competitor, and technology intelligence for enterprise client pursuits.\n\nThe team aligns on how industry news affects client conversations, competitive positioning, and proposal angles before sales meetings, deal reviews, and proposal development.",
+    "briefing_goals": "This is not headline news sharing.\n\nBriefings should help the team quickly align on:\n- how clients and competitors may act on a development\n- how the story connects to our proposals and client priorities\n- what to validate or discuss next\n\nEach brief should align facts, background, structural framing, and open questions the team can use in the field.",
+    "tone": "Calm, credible, and business-oriented.\n\nKeep language accessible for busy sales and solution stakeholders.\n\nAvoid hype, sensationalism, and overconfident claims.",
+    "notes": "Designed for short alignment before internal deal reviews, proposal working sessions, and client briefings.\n\nPrioritize practical framing, client-impact angles, and questions that are usable in customer conversations."
+  }
+}

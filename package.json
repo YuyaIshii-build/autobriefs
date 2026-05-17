@@ -3,8 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
+    "dev": "node scripts/dev.mjs",
+    "dev:clean": "node scripts/dev.mjs",
+    "dev:webpack": "node scripts/dev.mjs --webpack",
+    "repair": "node scripts/repair.mjs",
+    "build": "node scripts/build.mjs",
     "start": "next start",
     "lint": "next lint"
   },

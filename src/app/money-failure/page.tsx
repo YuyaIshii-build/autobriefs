@@ -3,8 +3,9 @@
 'use client';
 
 import { useState } from 'react';
-import Link from 'next/link';
+
 import InputForm from '@/components/InputForm';
+import LegacyToolShell from '@/components/service/LegacyToolShell';
 
 export default function  MarketArticlePage() {
   const [message, setMessage] = useState('');
@@ -35,16 +36,11 @@ export default function  MarketArticlePage() {
   };
 
   return (
-    <div className="p-6 max-w-xl mx-auto">
-      <Link href="/" className="inline-flex items-center gap-1 text-sm text-gray-600 hover:text-gray-900 mb-4">
-        ← ホームへ戻る
-      </Link>
-      <h1 className="text-2xl font-bold mb-4">🗣 お金の失敗ストーリー動画生成</h1>
-
+    <LegacyToolShell title="お金の失敗ストーリー">
+      <h1 className="text-2xl font-bold mb-4 text-slate-900">お金の失敗ストーリー動画生成</h1>
       <InputForm onSubmit={handleSubmit} />
-
-      {loading && <p className="mt-4 text-gray-600">送信中です…</p>}
-      {message && <p className="mt-4">{message}</p>}
-    </div>
+      {loading && <p className="mt-4 text-slate-600">送信中です…</p>}
+      {message && <p className="mt-4 text-slate-800">{message}</p>}
+    </LegacyToolShell>
   );
 }
