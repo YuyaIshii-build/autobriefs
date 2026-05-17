@@ -1,7 +1,9 @@
 import type { Metadata } from 'next';
 import { Geist, Geist_Mono } from 'next/font/google';
+import { cookies } from 'next/headers';
 
 import Providers from '@/components/service/Providers';
+import { DEFAULT_LOCALE, LOCALE_COOKIE, parseLocale } from '@/lib/i18n/constants';
 import './globals.css';
 
 const geistSans = Geist({
@@ -16,16 +18,19 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: 'AutoBriefs',
-  description: 'チーム向け Brief 作成 — Market Intelligence を動画 Brief に',
+  description: 'AI-generated business briefing videos for teams',
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const cookieStore = await cookies();
+  const locale = parseLocale(cookieStore.get(LOCALE_COOKIE)?.value) ?? DEFAULT_LOCALE;
+
   return (
-    <html lang="ja" suppressHydrationWarning>
+    <html lang={locale} suppressHydrationWarning>
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
         suppressHydrationWarning

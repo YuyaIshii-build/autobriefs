@@ -1,18 +1,12 @@
-export function jobStatusLabel(status: string): string {
-  switch (status) {
-    case 'pending':
-      return '待機中';
-    case 'sent_to_n8n':
-      return '生成依頼済み';
-    case 'processing':
-      return '処理中';
-    case 'completed':
-      return '完了';
-    case 'failed':
-      return '失敗';
-    default:
-      return status;
+import type { Locale } from '@/lib/i18n/constants';
+import { getMessages } from '@/messages';
+
+export function jobStatusLabel(status: string, locale: Locale): string {
+  const labels = getMessages(locale).jobStatus;
+  if (status in labels) {
+    return labels[status as keyof typeof labels];
   }
+  return status;
 }
 
 export function jobStatusClass(status: string): string {

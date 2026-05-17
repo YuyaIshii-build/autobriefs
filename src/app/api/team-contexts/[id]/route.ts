@@ -1,11 +1,14 @@
 import { NextResponse } from 'next/server';
+
+import { getApiMessages, getRequestLocale } from '@/lib/i18n/server';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
 
 type Ctx = { params: Promise<{ id: string }> };
 
-export async function GET(_req: Request, ctx: Ctx) {
+export async function GET(req: Request, ctx: Ctx) {
   const { id } = await ctx.params;
   try {
+    const api = getApiMessages(await getRequestLocale(req));
     const supabase = getSupabaseAdmin();
     const { data, error } = await supabase
       .from('team_contexts')
@@ -17,7 +20,7 @@ export async function GET(_req: Request, ctx: Ctx) {
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
     if (!data) {
-      return NextResponse.json({ error: '見つかりません' }, { status: 404 });
+      return NextResponse.json({ error: api.notFound }, { status: 404 });
     }
     return NextResponse.json(data);
   } catch (e) {
@@ -29,6 +32,7 @@ export async function GET(_req: Request, ctx: Ctx) {
 export async function PATCH(req: Request, ctx: Ctx) {
   const { id } = await ctx.params;
   try {
+    const api = getApiMessages(await getRequestLocale(req));
     const body = (await req.json()) as Record<string, unknown>;
     const updates: Record<string, unknown> = {};
 
@@ -43,7 +47,7 @@ export async function PATCH(req: Request, ctx: Ctx) {
     if (typeof body.notes === 'string') updates.notes = body.notes;
 
     if (Object.keys(updates).length === 0) {
-      return NextResponse.json({ error: '更新フィールドがありません' }, { status: 400 });
+      return NextResponse.json({ error: api.noUpdateFields }, { status: 400 });
     }
 
     const supabase = getSupabaseAdmin();
@@ -58,7 +62,7 @@ export async function PATCH(req: Request, ctx: Ctx) {
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
     if (!data) {
-      return NextResponse.json({ error: '見つかりません' }, { status: 404 });
+      return NextResponse.json({ error: api.notFound }, { status: 404 });
     }
     return NextResponse.json(data);
   } catch (e) {

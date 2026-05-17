@@ -6,6 +6,7 @@ import { buildN8nBriefPayload } from '@/lib/brief/n8n-payload';
 import { resolveN8nBriefWebhookUrl } from '@/lib/brief/resolve-n8n-brief-webhook';
 import { generateVideoId } from '@/lib/brief/video-id';
 import { getDefaultWorkspaceId, getSupabaseAdmin } from '@/lib/supabase/admin';
+import { getApiMessages, getRequestLocale } from '@/lib/i18n/server';
 import type { PromptModuleRow, PromptPipelineRow, TeamContextRow } from '@/lib/brief/n8n-payload';
 
 export async function GET() {
@@ -69,6 +70,8 @@ export async function GET() {
 
 export async function POST(req: Request) {
   try {
+    const locale = await getRequestLocale(req);
+    const api = getApiMessages(locale);
     const body = (await req.json()) as Record<string, unknown>;
     const team_context_id = typeof body.team_context_id === 'string' ? body.team_context_id : '';
     const prompt_pipeline_id =
@@ -79,13 +82,13 @@ export async function POST(req: Request) {
     const news_notes = typeof body.news_notes === 'string' ? body.news_notes : '';
 
     if (!team_context_id.trim()) {
-      return NextResponse.json({ error: 'Team Context は必須です' }, { status: 400 });
+      return NextResponse.json({ error: api.teamContextRequired }, { status: 400 });
     }
     if (!prompt_pipeline_id.trim()) {
-      return NextResponse.json({ error: 'Brief Type は必須です' }, { status: 400 });
+      return NextResponse.json({ error: api.briefTypeRequired }, { status: 400 });
     }
     if (!news_body.trim()) {
-      return NextResponse.json({ error: 'ニュース本文・要約は必須です' }, { status: 400 });
+      return NextResponse.json({ error: api.newsBodyRequired }, { status: 400 });
     }
 
     const supabase = getSupabaseAdmin();
@@ -103,7 +106,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: teamErr.message }, { status: 500 });
     }
     if (!team) {
-      return NextResponse.json({ error: 'Team Context が見つかりません' }, { status: 404 });
+      return NextResponse.json({ error: api.teamContextNotFound }, { status: 404 });
     }
 
     const { data: pipeline, error: pipeErr } = await supabase
@@ -116,7 +119,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: pipeErr.message }, { status: 500 });
     }
     if (!pipeline) {
-      return NextResponse.json({ error: 'テンプレートが見つかりません' }, { status: 404 });
+      return NextResponse.json({ error: api.templateNotFound }, { status: 404 });
     }
 
     let webhook: { url: string; locale: 'ja' | 'en' };

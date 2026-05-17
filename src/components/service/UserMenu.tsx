@@ -4,10 +4,9 @@ import Link from 'next/link';
 import { useEffect, useId, useRef, useState, type SVGProps } from 'react';
 
 import { useIsAdmin } from '@/components/service/AdminProvider';
+import { useLocale, useMessages } from '@/components/service/LocaleProvider';
 import { adminNavLinks } from '@/lib/admin/nav-links';
-
-// Future: session.name ?? session.email ?? 'User' from Supabase Auth
-const userLabel = 'User';
+import type { Locale } from '@/lib/i18n/constants';
 
 function menuItemClass(disabled?: boolean) {
   return disabled
@@ -15,9 +14,18 @@ function menuItemClass(disabled?: boolean) {
     : 'block w-full rounded-md px-3 py-2 text-left text-sm text-slate-700 transition-colors hover:bg-[rgba(188,0,44,0.08)] hover:text-[#bc002c]';
 }
 
+function languageButtonClass(active: boolean) {
+  return active
+    ? 'rounded-md bg-[rgba(188,0,44,0.12)] px-2.5 py-1 text-xs font-medium text-[#bc002c]'
+    : 'rounded-md px-2.5 py-1 text-xs font-medium text-slate-600 hover:bg-slate-100';
+}
+
 export default function UserMenu() {
+  const m = useMessages();
+  const { locale, setLocale, displayName, loading: localeLoading } = useLocale();
   const { isAdmin, loading: adminLoading } = useIsAdmin();
   const [open, setOpen] = useState(false);
+  const [savingLocale, setSavingLocale] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const menuId = useId();
 
@@ -41,6 +49,16 @@ export default function UserMenu() {
 
   const close = () => setOpen(false);
 
+  const onPickLocale = async (next: Locale) => {
+    if (next === locale || savingLocale) return;
+    setSavingLocale(true);
+    try {
+      await setLocale(next);
+    } finally {
+      setSavingLocale(false);
+    }
+  };
+
   return (
     <div ref={rootRef} className="relative shrink-0">
       <button
@@ -49,10 +67,12 @@ export default function UserMenu() {
         aria-expanded={open}
         aria-haspopup="menu"
         aria-controls={menuId}
-        title={userLabel}
+        title={displayName}
         onClick={() => setOpen((v) => !v)}
       >
-        <span className="sr-only">アカウントメニュー（{userLabel}）</span>
+        <span className="sr-only">
+          {m.userMenu.accountMenu} ({displayName})
+        </span>
         <UserIcon className="h-4 w-4" aria-hidden />
       </button>
 
@@ -63,25 +83,51 @@ export default function UserMenu() {
           className="absolute right-0 z-50 mt-2 w-56 origin-top-right rounded-lg border border-slate-200 bg-white py-1 shadow-lg"
         >
           <div className="border-b border-slate-100 px-3 py-2">
-            <p className="text-xs font-medium text-slate-500">Signed in as</p>
-            <p className="truncate text-sm font-semibold text-slate-900">{userLabel}</p>
+            <p className="text-xs font-medium text-slate-500">{m.userMenu.signedInAs}</p>
+            <p className="truncate text-sm font-semibold text-slate-900">{displayName}</p>
+          </div>
+
+          <div className="border-b border-slate-100 px-3 py-2" role="none">
+            <p className="text-xs font-medium text-slate-500">{m.userMenu.language}</p>
+            <div className="mt-1.5 flex gap-1" role="group" aria-label={m.userMenu.language}>
+              <button
+                type="button"
+                role="menuitemradio"
+                aria-checked={locale === 'ja'}
+                disabled={localeLoading || savingLocale}
+                className={languageButtonClass(locale === 'ja')}
+                onClick={() => onPickLocale('ja')}
+              >
+                {m.userMenu.languageJa}
+              </button>
+              <button
+                type="button"
+                role="menuitemradio"
+                aria-checked={locale === 'en'}
+                disabled={localeLoading || savingLocale}
+                className={languageButtonClass(locale === 'en')}
+                onClick={() => onPickLocale('en')}
+              >
+                {m.userMenu.languageEn}
+              </button>
+            </div>
           </div>
 
           <div className="px-1 py-1" role="none">
-            <button type="button" role="menuitem" disabled className={menuItemClass(true)} title="Coming soon">
-              Account
-              <span className="mt-0.5 block text-xs font-normal text-slate-400">Coming soon</span>
+            <button type="button" role="menuitem" disabled className={menuItemClass(true)} title={m.userMenu.comingSoon}>
+              {m.userMenu.account}
+              <span className="mt-0.5 block text-xs font-normal text-slate-400">{m.userMenu.comingSoon}</span>
             </button>
-            <button type="button" role="menuitem" disabled className={menuItemClass(true)} title="Coming soon">
-              Settings
-              <span className="mt-0.5 block text-xs font-normal text-slate-400">Coming soon</span>
+            <button type="button" role="menuitem" disabled className={menuItemClass(true)} title={m.userMenu.comingSoon}>
+              {m.userMenu.settings}
+              <span className="mt-0.5 block text-xs font-normal text-slate-400">{m.userMenu.comingSoon}</span>
             </button>
           </div>
 
           {!adminLoading && isAdmin ? (
             <>
               <div className="my-1 border-t border-slate-100" role="separator" />
-              <p className="px-3 pb-1 pt-1 text-xs font-medium uppercase tracking-wide text-slate-400">Admin</p>
+              <p className="px-3 pb-1 pt-1 text-xs font-medium uppercase tracking-wide text-slate-400">{m.userMenu.adminSection}</p>
               <div className="px-1 pb-0.5" role="none">
                 {adminNavLinks.map((item) => (
                   <Link
@@ -105,12 +151,10 @@ export default function UserMenu() {
               role="menuitem"
               disabled
               className={menuItemClass(true)}
-              title="HTTP Basic 認証はブラウザで管理されています"
+              title={m.userMenu.signOutHint}
             >
-              Sign out
-              <span className="mt-0.5 block text-xs font-normal leading-snug text-slate-400">
-                Basic auth is managed by your browser
-              </span>
+              {m.userMenu.signOut}
+              <span className="mt-0.5 block text-xs font-normal leading-snug text-slate-400">{m.userMenu.signOutHint}</span>
             </button>
           </div>
         </div>

@@ -5,6 +5,8 @@ import { useEffect, useState } from 'react';
 
 import AppShell from '@/components/service/AppShell';
 import PageHeader from '@/components/service/PageHeader';
+import { formatLocaleDate } from '@/lib/i18n/format';
+import { useLocale, useMessages } from '@/components/service/LocaleProvider';
 import { btnPrimaryClass } from '@/lib/ui/brand';
 
 type Team = {
@@ -14,6 +16,8 @@ type Team = {
 };
 
 export default function TeamsPage() {
+  const m = useMessages();
+  const { locale } = useLocale();
   const [teams, setTeams] = useState<Team[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -24,7 +28,7 @@ export default function TeamsPage() {
       try {
         const res = await fetch('/api/team-contexts');
         const data = await res.json();
-        if (!res.ok) throw new Error(data.error || '読み込みに失敗しました');
+        if (!res.ok) throw new Error(data.error || m.common.errorLoadFailed);
         if (!cancelled) setTeams(data);
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
@@ -40,20 +44,26 @@ export default function TeamsPage() {
   return (
     <AppShell>
       <PageHeader
-        title="Team Context"
-        description="Brief の出力品質を高めるため、チーム前提・トーン・Brief の狙いを登録・編集します。"
+        title={m.teamContext.pageTitle}
+        description={m.teamContext.pageDescription}
         action={
           <Link href="/teams/new" className={btnPrimaryClass}>
-            新規登録
+            {m.teamContext.newCta}
           </Link>
         }
       />
 
-      {loading && <p className="text-slate-600">読み込み中…</p>}
+      {loading && <p className="text-slate-600">{m.common.loading}</p>}
       {error && <p className="text-red-600 text-sm">{error}</p>}
 
       {!loading && !error && teams.length === 0 && (
-        <p className="text-slate-600">まだ登録がありません。Team Context を作成してください。</p>
+        <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/50 px-6 py-10 text-center">
+          <p className="font-medium text-slate-800">{m.teamContext.empty}</p>
+          <p className="mt-2 text-sm text-slate-600">{m.teamContext.emptyDescription}</p>
+          <Link href="/teams/new" className={`${btnPrimaryClass} mt-6 inline-flex`}>
+            {m.teamContext.newCta}
+          </Link>
+        </div>
       )}
 
       <ul className="space-y-2">
@@ -65,7 +75,7 @@ export default function TeamsPage() {
             >
               <span className="font-medium text-slate-900">{t.name}</span>
               <span className="block text-xs text-slate-500 mt-1">
-                更新: {new Date(t.updated_at).toLocaleString('ja-JP')}
+                {m.common.updated}: {formatLocaleDate(t.updated_at, locale)}
               </span>
             </Link>
           </li>

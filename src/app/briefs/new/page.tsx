@@ -4,21 +4,23 @@ import Link from 'next/link';
 
 import CreateBriefForm from '@/components/brief/CreateBriefForm';
 import AppShell from '@/components/service/AppShell';
+import { useMessages } from '@/components/service/LocaleProvider';
 import PageHeader from '@/components/service/PageHeader';
 
-/** ホームと同じ作成フォーム。ブックマーク・直リンク用に維持 */
+/** Same create form as home — kept for bookmarks and direct links */
 export default function BriefNewPage() {
+  const m = useMessages();
   return (
     <AppShell>
       <PageHeader
-        title="Create Team Brief"
+        title={m.createBrief.pageTitle}
         description={
           <>
-            共有したいニュースを入力し、チーム文脈で解釈された Brief 動画を作成します。{' '}
+            {m.createBrief.briefNewDescription}{' '}
             <Link href="/" className="text-[#bc002c] underline-offset-2 hover:text-[#9f0025] hover:underline">
-              ホーム
+              {m.common.home}
             </Link>
-            でも同じフォームを利用できます。
+            .
           </>
         }
       />

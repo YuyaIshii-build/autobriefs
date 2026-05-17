@@ -1,13 +1,16 @@
 'use client';
 
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
 
+import TeamContextFormFields, { type TeamContextFormValues } from '@/components/teams/TeamContextFormFields';
 import AppShell from '@/components/service/AppShell';
 import PageHeader from '@/components/service/PageHeader';
+import { useMessages } from '@/components/service/LocaleProvider';
 import { btnPrimaryClass } from '@/lib/ui/brand';
 
-const empty = {
+const empty: TeamContextFormValues = {
   name: '',
   company_summary: '',
   target_industries: '',
@@ -20,13 +23,14 @@ const empty = {
 };
 
 export default function TeamNewPage() {
+  const m = useMessages();
   const router = useRouter();
   const [f, setF] = useState(empty);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
   const set =
-    (key: keyof typeof empty) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
+    (key: keyof TeamContextFormValues) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
       setF((prev) => ({ ...prev, [key]: e.target.value }));
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -40,7 +44,7 @@ export default function TeamNewPage() {
         body: JSON.stringify(f),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || '作成に失敗しました');
+      if (!res.ok) throw new Error(data.error || m.teamContext.errorCreate);
       router.push(`/teams/${data.id}/edit`);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -51,73 +55,25 @@ export default function TeamNewPage() {
 
   return (
     <AppShell>
-      <PageHeader
-        title="Team Context 新規"
-        description="Brief に使うチーム前提情報を登録します。"
-      />
+      <PageHeader title={m.teamContext.newTitle} description={m.teamContext.newDescription} />
 
       <form onSubmit={handleSubmit} className="space-y-4 rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
-        <Field label="チーム名 *" required value={f.name} onChange={set('name')} />
-        <Area label="会社概要" value={f.company_summary} onChange={set('company_summary')} rows={3} />
-        <Field label="対象業界" value={f.target_industries} onChange={set('target_industries')} />
-        <Field label="主要顧客" value={f.customers} onChange={set('customers')} />
-        <Field label="主要競合" value={f.competitors} onChange={set('competitors')} />
-        <Field label="チームの役割" value={f.team_role} onChange={set('team_role')} />
-        <Area label="Briefの狙い" value={f.briefing_goals} onChange={set('briefing_goals')} rows={3} />
-        <Field label="トーン" value={f.tone} onChange={set('tone')} />
-        <Area label="補足メモ" value={f.notes} onChange={set('notes')} rows={2} />
+        <TeamContextFormFields values={f} onChange={set} />
 
         {error && <p className="text-red-600 text-sm">{error}</p>}
 
-        <div className="flex justify-end pt-2">
+        <div className="flex flex-wrap justify-end gap-3 pt-2">
+          <Link
+            href="/teams"
+            className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+          >
+            {m.common.cancel}
+          </Link>
           <button type="submit" disabled={loading} className={btnPrimaryClass}>
-            {loading ? '保存中…' : '作成'}
+            {loading ? m.common.saving : m.common.create}
           </button>
         </div>
       </form>
     </AppShell>
-  );
-}
-
-function Field({
-  label,
-  value,
-  onChange,
-  required,
-}: {
-  label: string;
-  value: string;
-  onChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
-  required?: boolean;
-}) {
-  return (
-    <div>
-      <label className="block text-sm font-medium text-gray-700 mb-1">{label}</label>
-      <input
-        className="w-full p-2 border border-gray-300 rounded"
-        value={value}
-        onChange={onChange}
-        required={required}
-      />
-    </div>
-  );
-}
-
-function Area({
-  label,
-  value,
-  onChange,
-  rows,
-}: {
-  label: string;
-  value: string;
-  onChange: (e: React.ChangeEvent<HTMLTextAreaElement>) => void;
-  rows: number;
-}) {
-  return (
-    <div>
-      <label className="block text-sm font-medium text-gray-700 mb-1">{label}</label>
-      <textarea className="w-full p-2 border border-gray-300 rounded" rows={rows} value={value} onChange={onChange} />
-    </div>
   );
 }

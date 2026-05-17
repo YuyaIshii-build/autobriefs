@@ -1,5 +1,7 @@
 import Link from 'next/link';
 
+import { useMessages } from '@/components/service/LocaleProvider';
+
 type Props = {
   showWordmark?: boolean;
   className?: string;
@@ -7,11 +9,12 @@ type Props = {
 
 /** ファビコン（/favicon.ico）と AutoBriefs ワードマーク — 静的 img で webpack チャンク競合を避ける */
 export default function BrandLogo({ showWordmark = true, className = '' }: Props) {
+  const m = useMessages();
   return (
     <Link
       href="/"
       className={`inline-flex items-center gap-3 ${className}`.trim()}
-      aria-label="AutoBriefs ホーム"
+      aria-label={m.nav.brandHome}
     >
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img

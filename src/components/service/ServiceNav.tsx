@@ -4,18 +4,20 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 
 import BrandLogo from '@/components/service/BrandLogo';
+import { useMessages } from '@/components/service/LocaleProvider';
 import UserMenu from '@/components/service/UserMenu';
 import { navLinkClass } from '@/lib/ui/brand';
 import { APP_CONTAINER_CLASS } from '@/lib/layout/app-container';
 
-const userLinks = [
-  { href: '/', label: 'Create Brief' },
-  { href: '/briefs', label: 'Archive' },
-  { href: '/teams', label: 'Team Context' },
-] as const;
-
 export default function ServiceNav() {
+  const m = useMessages();
   const pathname = usePathname();
+
+  const userLinks = [
+    { href: '/', label: m.nav.createBrief },
+    { href: '/briefs', label: m.nav.archive },
+    { href: '/teams', label: m.nav.teamContext },
+  ] as const;
 
   const isActive = (href: string) => {
     const p = pathname ?? '';
@@ -43,7 +45,7 @@ export default function ServiceNav() {
         <BrandLogo />
 
         <div className="flex flex-wrap items-center gap-2 sm:gap-3">
-          <nav className="flex flex-wrap items-center gap-0.5 sm:gap-1" aria-label="メインナビゲーション">
+          <nav className="flex flex-wrap items-center gap-0.5 sm:gap-1" aria-label={m.nav.mainAria}>
             {userLinks.map((item) => (
               <Link key={item.href} href={item.href} className={navLinkClass(isActive(item.href))}>
                 {item.label}

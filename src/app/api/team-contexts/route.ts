@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getDefaultWorkspaceId, getSupabaseAdmin } from '@/lib/supabase/admin';
+import { getApiMessages, getRequestLocale } from '@/lib/i18n/server';
 
 export async function GET() {
   try {
@@ -21,10 +22,11 @@ export async function GET() {
 
 export async function POST(req: Request) {
   try {
+    const api = getApiMessages(await getRequestLocale(req));
     const body = (await req.json()) as Record<string, unknown>;
     const name = typeof body.name === 'string' ? body.name.trim() : '';
     if (!name) {
-      return NextResponse.json({ error: 'name は必須です' }, { status: 400 });
+      return NextResponse.json({ error: api.nameRequired }, { status: 400 });
     }
 
     const workspaceId = getDefaultWorkspaceId();

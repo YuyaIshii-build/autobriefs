@@ -3,6 +3,7 @@
 import { useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 
+import { useMessages } from '@/components/service/LocaleProvider';
 import { btnPrimaryClass } from '@/lib/ui/brand';
 
 type TeamOpt = { id: string; name: string };
@@ -20,6 +21,7 @@ type Props = {
 };
 
 export default function CreateBriefForm({ className = '' }: Props) {
+  const m = useMessages();
   const router = useRouter();
   const [teams, setTeams] = useState<TeamOpt[]>([]);
   const [templates, setTemplates] = useState<TemplateOpt[]>([]);
@@ -41,8 +43,8 @@ export default function CreateBriefForm({ className = '' }: Props) {
         const [tr, pr] = await Promise.all([fetch('/api/team-contexts'), fetch('/api/prompt-pipelines')]);
         const tj = await tr.json();
         const pj = await pr.json();
-        if (!tr.ok) throw new Error(tj.error || 'Team の読み込みに失敗');
-        if (!pr.ok) throw new Error(pj.error || 'Brief Type の読み込みに失敗');
+        if (!tr.ok) throw new Error(tj.error || m.createBrief.errorLoadTeams);
+        if (!pr.ok) throw new Error(pj.error || m.createBrief.errorLoadBriefTypes);
         if (!cancelled) {
           setTeams(tj.map((x: { id: string; name: string }) => ({ id: x.id, name: x.name })));
           setTemplates(
@@ -68,15 +70,15 @@ export default function CreateBriefForm({ className = '' }: Props) {
     e.preventDefault();
     setMessage('');
     if (!teamId) {
-      setMessage('Team Context を選択してください');
+      setMessage(m.createBrief.validationTeam);
       return;
     }
     if (!pipelineId) {
-      setMessage('Brief Type を選択してください');
+      setMessage(m.createBrief.validationBriefType);
       return;
     }
     if (!news_body.trim()) {
-      setMessage('ニュース本文・要約を入力してください');
+      setMessage(m.createBrief.validationBody);
       return;
     }
     setSubmitting(true);
@@ -102,7 +104,7 @@ export default function CreateBriefForm({ className = '' }: Props) {
         router.push('/briefs');
         return;
       }
-      setMessage(data.error || '作成に失敗しました');
+      setMessage(data.error || m.createBrief.errorStart);
     } catch (err) {
       setMessage(err instanceof Error ? err.message : String(err));
     } finally {
@@ -111,7 +113,7 @@ export default function CreateBriefForm({ className = '' }: Props) {
   };
 
   if (loading) {
-    return <p className="text-sm text-slate-500">フォームを読み込み中…</p>;
+    return <p className="text-sm text-slate-500">{m.common.loadingForm}</p>;
   }
 
   if (loadError) {
@@ -124,8 +126,8 @@ export default function CreateBriefForm({ className = '' }: Props) {
       className={`space-y-5 rounded-xl border border-slate-200 bg-white p-6 shadow-sm sm:p-8 ${className}`.trim()}
     >
       <FieldSelect
-        label="Team Context"
-        hint="どのチーム向けに解釈するかを選びます"
+        label={m.createBrief.teamContextLabel}
+        hint={m.createBrief.teamContextHint}
         value={teamId}
         onChange={setTeamId}
         required
@@ -133,8 +135,8 @@ export default function CreateBriefForm({ className = '' }: Props) {
       />
 
       <FieldSelect
-        label="Brief Type"
-        hint="出力する Brief の型を選びます"
+        label={m.createBrief.briefTypeLabel}
+        hint={m.createBrief.briefTypeHint}
         value={pipelineId}
         onChange={setPipelineId}
         required
@@ -150,39 +152,39 @@ export default function CreateBriefForm({ className = '' }: Props) {
           if (!sel?.description?.trim()) return null;
           return (
             <aside className="rounded-md border border-slate-100 bg-slate-50 px-3 py-2 text-sm text-slate-700">
-              <p className="text-xs font-medium text-slate-500 mb-1">Brief Type の説明</p>
+              <p className="text-xs font-medium text-slate-500 mb-1">{m.createBrief.briefTypeDescription}</p>
               <p className="whitespace-pre-wrap">{sel.description}</p>
             </aside>
           );
         })()
       ) : null}
 
-      <FieldInput label="ニュースタイトル" value={news_title} onChange={setNewsTitle} required />
+      <FieldInput label={m.createBrief.newsTitle} value={news_title} onChange={setNewsTitle} placeholder={m.createBrief.placeholderTitle} />
 
-      <FieldInput label="URL" value={news_url} onChange={setNewsUrl} type="url" />
+      <FieldInput label={m.createBrief.newsUrl} value={news_url} onChange={setNewsUrl} type="url" placeholder={m.createBrief.placeholderUrl} />
 
       <FieldTextarea
-        label="ニュース本文・要約"
+        label={m.createBrief.newsBody}
         value={news_body}
         onChange={setNewsBody}
         rows={10}
         required
-        placeholder="ニュース本文、要約、または共有したい内容を貼り付けてください"
+        placeholder={m.createBrief.placeholderBody}
       />
 
       <FieldTextarea
-        label="補足メモ"
+        label={m.createBrief.newsNotes}
         value={news_notes}
         onChange={setNewsNotes}
         rows={3}
-        placeholder="特に注目してほしい観点があれば入力してください"
+        placeholder={m.createBrief.placeholderNotes}
       />
 
       {message ? <p className="text-sm text-red-600">{message}</p> : null}
 
       <div className="flex justify-end pt-1">
         <button type="submit" disabled={submitting} className={`${btnPrimaryClass} px-5 py-3`}>
-          {submitting ? '送信中…' : 'チーム向けBriefを作成'}
+          {submitting ? m.createBrief.submitting : m.createBrief.submit}
         </button>
       </div>
     </form>
@@ -204,6 +206,7 @@ function FieldSelect({
   options: { value: string; label: string }[];
   required?: boolean;
 }) {
+  const m = useMessages();
   const id = `field-${label.replace(/\s+/g, '-')}`;
   return (
     <fieldset className="border-0 p-0 m-0">
@@ -220,7 +223,7 @@ function FieldSelect({
         onChange={(e) => onChange(e.target.value)}
         required={required}
       >
-        <option value="">{required ? '選択してください' : '（未指定）'}</option>
+        <option value="">{required ? m.common.selectRequired : m.common.selectOptional}</option>
         {options.map((o) => (
           <option key={o.value} value={o.value}>
             {o.label}
@@ -237,22 +240,30 @@ function FieldInput({
   onChange,
   required,
   type = 'text',
+  placeholder,
 }: {
   label: string;
   value: string;
   onChange: (v: string) => void;
   required?: boolean;
   type?: string;
+  placeholder?: string;
 }) {
+  const id = `field-${label.replace(/\s+/g, '-')}`;
   return (
     <fieldset className="border-0 p-0 m-0">
-      <label className="block text-sm font-medium text-slate-800">{label}</label>
+      <label htmlFor={id} className="block text-sm font-medium text-slate-800">
+        {label}
+        {required ? <span className="text-[#bc002c]"> *</span> : null}
+      </label>
       <input
+        id={id}
         type={type}
         className="mt-1.5 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900"
         value={value}
         onChange={(e) => onChange(e.target.value)}
         required={required}
+        placeholder={placeholder}
       />
     </fieldset>
   );
