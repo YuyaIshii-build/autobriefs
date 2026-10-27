@@ -31,12 +31,14 @@ const SAFE_REASONS = new Set([
   'expires_in_missing',
   'invalid_video_id',
   'mp4_not_found',
-  'size_unknown',
+  'size_read_failed',
+  'marker_read_failed',
+  'lock_create_failed',
+  'marker_write_failed',
   'stream_unavailable',
   'upload_in_progress',
   'upload_incomplete',
   'upload_failed',
-  'marker_save_failed',
   'marker_invalid',
   'privacy_mismatch',
   'session_start_failed',
@@ -72,6 +74,8 @@ export type PutResponse = {
   headers: Headers;
   bodyText: string;
 };
+
+export type ListMp4Size = (videoId: string) => Promise<number | 'missing' | 'unknown'>;
 
 export type UploadDeps = {
   fetchImpl?: typeof fetch;
@@ -133,8 +137,8 @@ export async function handleYoutubeUpload(request: Request, deps: UploadDeps = {
   let marker: 'absent' | 'invalid' | { youtubeVideoId: string };
   try {
     marker = await storage.readMarker(videoId);
-  } catch {
-    return json({ error: 'storage_failed' }, 500);
+  } catch (error) {
+    return failStage(error, 'marker_read_failed');
   }
   if (marker === 'invalid') return json({ error: 'marker_invalid' }, 409);
   if (marker !== 'absent') {
@@ -147,20 +151,26 @@ export async function handleYoutubeUpload(request: Request, deps: UploadDeps = {
   let size: number | 'missing' | 'unknown';
   try {
     size = await storage.readMp4Size(videoId);
-  } catch {
-    return json({ error: 'storage_failed' }, 500);
+  } catch (error) {
+    return failStage(error, 'size_read_failed');
   }
   if (size === 'missing') return json({ error: 'mp4_not_found' }, 404);
-  if (size === 'unknown') return json({ error: 'size_unknown' }, 422);
+  if (typeof size !== 'number') {
+    logStage('size_read', null, 'invalid_content_length');
+    return json({ error: 'size_read_failed' }, 500);
+  }
 
   let lock: 'created' | 'exists' | 'failed';
   try {
     lock = await storage.createLock(videoId);
-  } catch {
-    return json({ error: 'storage_failed' }, 500);
+  } catch (error) {
+    return failStage(error, 'lock_create_failed');
   }
   if (lock === 'exists') return json({ error: 'upload_in_progress' }, 409);
-  if (lock !== 'created') return json({ error: 'storage_failed' }, 500);
+  if (lock !== 'created') {
+    logStage('lock_create', null, 'failed');
+    return json({ error: 'lock_create_failed' }, 500);
+  }
 
   let sessionStarted = false;
   try {
@@ -194,9 +204,14 @@ export async function handleYoutubeUpload(request: Request, deps: UploadDeps = {
 
     try {
       await storage.saveMarker(videoId, uploaded.youtubeVideoId);
-    } catch {
+    } catch (error) {
+      logStage(
+        'marker_write',
+        error instanceof UploadStageError ? error.status : null,
+        error instanceof UploadStageError ? error.code : 'unknown',
+      );
       return json(
-        { error: 'marker_save_failed', youtubeVideoId: uploaded.youtubeVideoId, privacyStatus: 'private' },
+        { error: 'marker_write_failed', youtubeVideoId: uploaded.youtubeVideoId, privacyStatus: 'private' },
         500,
       );
     }
@@ -221,28 +236,32 @@ export async function handleYoutubeUpload(request: Request, deps: UploadDeps = {
   }
 }
 
-export function createSupabaseUploadStorage(fetchImpl: typeof fetch = fetch): UploadStorage {
+export function createSupabaseUploadStorage(
+  fetchImpl: typeof fetch = fetch,
+  listMp4Size: ListMp4Size = defaultListMp4Size,
+): UploadStorage {
   return {
     async readMarker(videoId) {
       const supabase = getSupabaseAdmin();
       const { data, error } = await supabase.storage.from(BUCKET).download(markerPath(videoId));
       if (error) {
         if (isNotFound(error)) return 'absent';
-        throw new Error('storage_failed');
+        throw new UploadStageError('marker_read_failed', storageStatus(error) || null, storageErrorCode(error));
       }
       const text = (await data.text()).trim();
       if (!YOUTUBE_ID_PATTERN.test(text)) return 'invalid';
       return { youtubeVideoId: text };
     },
     async readMp4Size(videoId) {
-      const supabase = getSupabaseAdmin();
-      const { data, error } = await supabase.storage.from(BUCKET).info(mp4Path(videoId));
-      if (error) {
-        if (isNotFound(error)) return 'missing';
-        throw new Error('storage_failed');
-      }
-      const size = readByteSize(data?.size);
-      return size === null ? 'unknown' : size;
+      const head = await readMp4SizeFromHead(fetchImpl, videoId);
+      if (head.ok) return head.size;
+      const listed = await listMp4Size(videoId).catch((error: unknown) => {
+        logStage('size_list', null, storageErrorCode(error));
+        return 'unknown' as const;
+      });
+      if (typeof listed === 'number') return listed;
+      if (head.status === 404 && listed === 'missing') return 'missing';
+      throw new UploadStageError('size_read_failed', head.status, head.code);
     },
     async openMp4(videoId, start) {
       const supabaseUrl = process.env.SUPABASE_URL?.trim().replace(/\/$/, '');
@@ -269,12 +288,12 @@ export function createSupabaseUploadStorage(fetchImpl: typeof fetch = fetch): Up
       const supabase = getSupabaseAdmin();
       const { error } = await supabase.storage.from(BUCKET).upload(lockPath(videoId), 'uploading', {
         upsert: false,
-        contentType: 'text/plain; charset=utf-8',
+        contentType: 'text/plain',
         cacheControl: '0',
       });
       if (!error) return 'created';
       if (isAlreadyExists(error)) return 'exists';
-      return 'failed';
+      throw new UploadStageError('lock_create_failed', storageStatus(error) || null, storageErrorCode(error));
     },
     async deleteLock(videoId) {
       const supabase = getSupabaseAdmin();
@@ -284,14 +303,16 @@ export function createSupabaseUploadStorage(fetchImpl: typeof fetch = fetch): Up
       const supabase = getSupabaseAdmin();
       const { error } = await supabase.storage.from(BUCKET).upload(markerPath(videoId), youtubeVideoId, {
         upsert: false,
-        contentType: 'text/plain; charset=utf-8',
+        contentType: 'text/plain',
         cacheControl: '0',
       });
       if (!error) return;
-      if (!isAlreadyExists(error)) throw new Error('storage_failed');
+      if (!isAlreadyExists(error)) {
+        throw new UploadStageError('marker_write_failed', storageStatus(error) || null, storageErrorCode(error));
+      }
       const existing = await this.readMarker(videoId);
       if (existing !== 'absent' && existing !== 'invalid' && existing.youtubeVideoId === youtubeVideoId) return;
-      throw new Error('storage_failed');
+      throw new UploadStageError('marker_write_failed', storageStatus(error) || null, storageErrorCode(error));
     },
   };
 }
@@ -559,7 +580,7 @@ async function markerFailure(
   try {
     await storage.saveMarker(videoId, youtubeVideoId);
   } catch {
-    return json({ error: 'marker_save_failed', youtubeVideoId, privacyStatus: 'private' }, 500);
+    return json({ error: 'marker_write_failed', youtubeVideoId, privacyStatus: 'private' }, 500);
   }
   await storage.deleteLock(videoId).catch(() => undefined);
   return json({ error, youtubeVideoId, privacyStatus: 'private' }, 502);
@@ -586,20 +607,106 @@ function lockPath(videoId: string): string {
   return `${videoId}/youtube-upload-lock.txt`;
 }
 
-function isNotFound(error: { message?: string; status?: number; statusCode?: number | string }): boolean {
+class UploadStageError extends Error {
+  readonly stage: string;
+  readonly status: number | null;
+  readonly code: string;
+
+  constructor(stage: string, status: number | null, code: string) {
+    super(safeToken(stage));
+    this.stage = safeToken(stage);
+    this.status = status;
+    this.code = safeToken(code);
+  }
+}
+
+function failStage(error: unknown, fallback: string): Response {
+  if (error instanceof UploadStageError) {
+    logStage(error.stage, error.status, error.code);
+    return json({ error: error.stage }, 500);
+  }
+  logStage(fallback, null, 'unknown');
+  return json({ error: safeToken(fallback) }, 500);
+}
+
+function logStage(stage: string, status: number | null, code: string): void {
+  const safeStatus = status === null ? 'none' : String(status);
+  if (!/^\d{3}$/.test(safeStatus) && safeStatus !== 'none') return;
+  console.error(`youtube_upload stage=${safeToken(stage)} status=${safeStatus} code=${safeToken(code)}`);
+}
+
+function safeToken(value: string): string {
+  return /^[A-Za-z0-9_]{1,64}$/.test(value) ? value : 'unknown';
+}
+
+async function readMp4SizeFromHead(
+  fetchImpl: typeof fetch,
+  videoId: string,
+): Promise<{ ok: true; size: number } | { ok: false; status: number | null; code: string }> {
+  const url = publicMp4Url(videoId);
+  if (!url) return { ok: false, status: null, code: 'head_failed' };
+  try {
+    const response = await fetchImpl(url, { method: 'HEAD', redirect: 'manual', cache: 'no-store' });
+    await response.body?.cancel();
+    if (response.status !== 200) {
+      return { ok: false, status: response.status, code: response.status === 404 ? 'not_found' : 'head_failed' };
+    }
+    const size = readByteSize(response.headers.get('content-length'));
+    if (size === null) return { ok: false, status: response.status, code: 'invalid_content_length' };
+    return { ok: true, size };
+  } catch {
+    return { ok: false, status: null, code: 'head_failed' };
+  }
+}
+
+function publicMp4Url(videoId: string): string | null {
+  const base = process.env.SUPABASE_URL?.trim().replace(/\/$/, '');
+  if (!base || !validateVideoId(videoId)) return null;
+  return `${base}/storage/v1/object/public/projects/${videoId}/${videoId}.mp4`;
+}
+
+async function defaultListMp4Size(videoId: string): Promise<number | 'missing' | 'unknown'> {
+  const supabase = getSupabaseAdmin();
+  const { data, error } = await supabase.storage.from(BUCKET).list(videoId, {
+    limit: 100,
+    search: `${videoId}.mp4`,
+  });
+  if (error) {
+    logStage('size_list', storageStatus(error) || null, storageErrorCode(error));
+    return 'unknown';
+  }
+  const file = (data ?? []).find((item) => item.name === `${videoId}.mp4`);
+  if (!file) return 'missing';
+  const size = readByteSize(file.metadata?.size);
+  return size === null ? 'unknown' : size;
+}
+
+function storageErrorCode(error: unknown): string {
+  if (!error || typeof error !== 'object') return 'unknown';
+  const record = error as { code?: unknown; error?: unknown };
+  for (const value of [record.code, record.error]) {
+    if (typeof value === 'string' && /^[A-Za-z0-9_]{1,64}$/.test(value)) return value;
+  }
+  return 'unknown';
+}
+
+function isNotFound(error: unknown): boolean {
   const status = storageStatus(error);
   if (status === 400 || status === 404) return true;
-  return (error.message ?? '').toLowerCase().includes('not found');
+  const message = error && typeof error === 'object' && 'message' in error ? String(error.message) : '';
+  return message.toLowerCase().includes('not found');
 }
 
-function isAlreadyExists(error: { message?: string; status?: number; statusCode?: number | string }): boolean {
+function isAlreadyExists(error: unknown): boolean {
   if (storageStatus(error) === 409) return true;
-  const message = (error.message ?? '').toLowerCase();
-  return message.includes('already exists') || message.includes('duplicate');
+  const message = error && typeof error === 'object' && 'message' in error ? String(error.message) : '';
+  return message.toLowerCase().includes('already exists') || message.toLowerCase().includes('duplicate');
 }
 
-function storageStatus(error: { status?: number; statusCode?: number | string }): number {
-  const value = error.status ?? error.statusCode;
+function storageStatus(error: unknown): number {
+  if (!error || typeof error !== 'object') return 0;
+  const record = error as { status?: unknown; statusCode?: unknown };
+  const value = record.status ?? record.statusCode;
   const status = typeof value === 'number' ? value : Number(value);
   return Number.isFinite(status) ? status : 0;
 }

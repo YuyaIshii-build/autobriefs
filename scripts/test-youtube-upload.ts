@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 
 import { POST as uploadRoute } from '../src/app/api/youtube/upload/route';
 import {
+  createSupabaseUploadStorage,
   handleYoutubeUpload,
   readByteSize,
   validateVideoId,
@@ -404,7 +405,7 @@ async function main() {
       const text = await response.text();
       const body = JSON.parse(text) as { error: string; youtubeVideoId: string; privacyStatus: string; alreadyUploaded?: boolean };
       assert.equal(response.status, 500);
-      assert.equal(body.error, 'marker_save_failed');
+      assert.equal(body.error, 'marker_write_failed');
       assert.equal(body.youtubeVideoId, YOUTUBE_ID);
       assert.equal(body.privacyStatus, 'private');
       assert.equal(body.alreadyUploaded, undefined);
@@ -440,8 +441,8 @@ async function main() {
       storage: unknown,
       fetchImpl: tokenFetch(),
     });
-    assert.equal(unknownResponse.status, 422);
-    assert.match(await unknownResponse.text(), /size_unknown/);
+    assert.equal(unknownResponse.status, 500);
+    assert.match(await unknownResponse.text(), /size_read_failed/);
     assert.equal(unknown.lock, 'absent');
 
     const storage = fakeStorage();
@@ -462,12 +463,136 @@ async function main() {
     assert.equal(storage.lockDeleted, true);
   });
 
-  await test('実装ファイルにログ出力が無い', async () => {
+  await test('HEADで公開URLからサイズを取得する', async () => {
+    applyEnv(configuredEnv());
+    let listed = false;
+    const storage = createSupabaseUploadStorage(async (url, init) => {
+      assert.equal(init?.method, 'HEAD');
+      assert.equal(
+        String(url),
+        `https://example.supabase.co/storage/v1/object/public/projects/${VIDEO_ID}/${VIDEO_ID}.mp4`,
+      );
+      const headers = new Headers(init?.headers);
+      assert.equal(headers.get('authorization'), null);
+      assert.equal(headers.get('apikey'), null);
+      return new Response(null, { status: 200, headers: { 'content-length': '1200' } });
+    }, async () => {
+      listed = true;
+      return 'missing';
+    });
+    assert.equal(await storage.readMp4Size(VIDEO_ID), 1200);
+    assert.equal(listed, false);
+  });
+
+  await test('HEADが404でlistにも無い場合はアップロードしない', async () => {
+    applyEnv(configuredEnv());
+    const storage = createSupabaseUploadStorage(
+      async () => new Response(null, { status: 404 }),
+      async () => 'missing',
+    );
+    assert.equal(await storage.readMp4Size(VIDEO_ID), 'missing');
+    const handlerStorage = fakeStorage('missing');
+    let called = false;
+    const response = await handleYoutubeUpload(uploadRequest({ videoId: VIDEO_ID }, `Bearer ${START_SECRET}`), {
+      storage: handlerStorage,
+      fetchImpl: (async () => {
+        called = true;
+        throw new Error('fetch should not run');
+      }) as typeof fetch,
+    });
+    assert.equal(response.status, 404);
+    assert.match(await response.text(), /mp4_not_found/);
+    assert.equal(called, false);
+    assert.equal(handlerStorage.lock, 'absent');
+  });
+
+  await test('Content-Lengthが不正ならsize_read_failed', async () => {
+    applyEnv(configuredEnv());
+    const storage = createSupabaseUploadStorage(
+      async () => new Response(null, { status: 200, headers: { 'content-length': '0' } }),
+      async () => 'unknown',
+    );
+    await assert.rejects(storage.readMp4Size(VIDEO_ID), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.message, 'size_read_failed');
+      return true;
+    });
+  });
+
+  await test('HEAD通信失敗ならsize_read_failed', async () => {
+    applyEnv(configuredEnv());
+    const storage = createSupabaseUploadStorage(
+      async () => {
+        throw new Error(ACCESS_TOKEN);
+      },
+      async () => 'unknown',
+    );
+    const logs: string[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => {
+      logs.push(args.map((arg) => String(arg)).join(' '));
+    };
+    try {
+      const handlerStorage = fakeStorage();
+      handlerStorage.readMp4Size = async () => storage.readMp4Size(VIDEO_ID);
+      const response = await handleYoutubeUpload(uploadRequest({ videoId: VIDEO_ID }, `Bearer ${START_SECRET}`), {
+        storage: handlerStorage,
+        fetchImpl: (async () => {
+          throw new Error('youtube should not run');
+        }) as typeof fetch,
+      });
+      const text = await response.text();
+      assert.equal(response.status, 500);
+      assert.match(text, /size_read_failed/);
+      assertNoSecrets(text);
+      assert.equal(logs.some((line) => line.includes(ACCESS_TOKEN)), false);
+      assert.equal(logs.some((line) => line.includes('stage=size_read_failed') && line.includes('status=none')), true);
+    } finally {
+      console.error = original;
+    }
+  });
+
+  await test('マーカー読み込み失敗とロック作成失敗はコードを分ける', async () => {
+    applyEnv(configuredEnv());
+    const markerStorage = fakeStorage();
+    markerStorage.readMarker = async () => {
+      throw new Error(REFRESH_TOKEN);
+    };
+    const markerResponse = await handleYoutubeUpload(uploadRequest({ videoId: VIDEO_ID }, `Bearer ${START_SECRET}`), {
+      storage: markerStorage,
+    });
+    const markerBody = await markerResponse.text();
+    assert.equal(markerResponse.status, 500);
+    assert.match(markerBody, /marker_read_failed/);
+    assertNoSecrets(markerBody);
+
+    const lockStorage = fakeStorage();
+    lockStorage.createLock = async () => 'failed';
+    let called = false;
+    const lockResponse = await handleYoutubeUpload(uploadRequest({ videoId: VIDEO_ID }, `Bearer ${START_SECRET}`), {
+      storage: lockStorage,
+      fetchImpl: (async () => {
+        called = true;
+        throw new Error('fetch should not run');
+      }) as typeof fetch,
+    });
+    const lockBody = await lockResponse.text();
+    assert.equal(lockResponse.status, 500);
+    assert.match(lockBody, /lock_create_failed/);
+    assert.equal(called, false);
+    assertNoSecrets(lockBody);
+  });
+
+  await test('ログは段階とステータスだけを出す', async () => {
     for (const file of SOURCE_FILES) {
       const source = readFileSync(file, 'utf8');
-      assert.equal(source.includes('console.'), false, file);
+      assert.equal(source.includes('console.log'), false, file);
+      assert.equal(source.includes('console.debug'), false, file);
       assert.equal(source.includes('stdout'), false, file);
       assert.equal(source.includes('stderr'), false, file);
+      if (file.endsWith('upload.ts')) {
+        assert.match(source, /console\.error\(`youtube_upload stage=/);
+      }
     }
   });
 
