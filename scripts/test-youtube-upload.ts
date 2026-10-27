@@ -583,6 +583,144 @@ async function main() {
     assertNoSecrets(lockBody);
   });
 
+  await test('存在しないマーカーの404は初回アップロードとして進む', async () => {
+    applyEnv(configuredEnv());
+    const storage = fakeStorage();
+    const marker = createSupabaseUploadStorage(fetch, async () => 'missing', async () => ({
+      data: null,
+      error: {
+        name: 'StorageUnknownError',
+        message: '{}',
+        originalError: { status: 404 },
+      },
+    }));
+    storage.readMarker = () => marker.readMarker(VIDEO_ID);
+    const response = await handleYoutubeUpload(uploadRequest({ videoId: VIDEO_ID }, `Bearer ${START_SECRET}`), {
+      storage,
+      fetchImpl: tokenFetch(),
+      putImpl: successPut().put,
+    });
+    const body = await response.json() as { error?: string; privacyStatus: string; alreadyUploaded: boolean };
+    assert.equal(response.status, 200);
+    assert.equal(body.error, undefined);
+    assert.equal(body.privacyStatus, 'private');
+    assert.equal(body.alreadyUploaded, false);
+    assert.deepEqual(storage.markerSaves, [YOUTUBE_ID]);
+  });
+
+  await test('ステータスがエラー自身にある404はマーカーなし', async () => {
+    applyEnv(configuredEnv());
+    const storage = createSupabaseUploadStorage(fetch, async () => 'missing', async () => ({
+      data: null,
+      error: { name: 'StorageApiError', message: 'Object not found', status: 404 },
+    }));
+    assert.equal(await storage.readMarker(VIDEO_ID), 'absent');
+  });
+
+  await test('HTTP 400でObject not foundのときだけマーカーなし', async () => {
+    applyEnv(configuredEnv());
+    const identified = createSupabaseUploadStorage(fetch, async () => 'missing', async () => ({
+      data: null,
+      error: {
+        name: 'StorageUnknownError',
+        message: '{}',
+        originalError: new Response(
+          JSON.stringify({ statusCode: '404', error: 'not_found', message: 'Object not found', code: 'NoSuchKey' }),
+          { status: 400 },
+        ),
+      },
+    }));
+    assert.equal(await identified.readMarker(VIDEO_ID), 'absent');
+
+    const unknown = createSupabaseUploadStorage(fetch, async () => 'missing', async () => ({
+      data: null,
+      error: {
+        name: 'StorageUnknownError',
+        message: '{}',
+        originalError: { status: 400 },
+      },
+    }));
+    await assert.rejects(unknown.readMarker(VIDEO_ID), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.message, 'marker_read_failed');
+      return true;
+    });
+
+    const handlerStorage = fakeStorage();
+    handlerStorage.readMarker = () => unknown.readMarker(VIDEO_ID);
+    let called = false;
+    const response = await handleYoutubeUpload(uploadRequest({ videoId: VIDEO_ID }, `Bearer ${START_SECRET}`), {
+      storage: handlerStorage,
+      fetchImpl: (async () => {
+        called = true;
+        throw new Error('youtube should not run');
+      }) as typeof fetch,
+    });
+    const text = await response.text();
+    assert.equal(response.status, 500);
+    assert.match(text, /marker_read_failed/);
+    assert.equal(called, false);
+    assert.equal(handlerStorage.lock, 'absent');
+    assertNoSecrets(text);
+  });
+
+  await test('権限エラーと通信失敗はマーカーなしにしない', async () => {
+    applyEnv(configuredEnv());
+    const denied = createSupabaseUploadStorage(fetch, async () => 'missing', async () => ({
+      data: null,
+      error: {
+        name: 'StorageUnknownError',
+        message: '{}',
+        originalError: new Response(
+          JSON.stringify({ statusCode: '403', error: 'Unauthorized', message: 'Access denied', code: 'AccessDenied' }),
+          { status: 400 },
+        ),
+      },
+    }));
+    await assert.rejects(denied.readMarker(VIDEO_ID), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.message, 'marker_read_failed');
+      return true;
+    });
+
+    const failed = createSupabaseUploadStorage(fetch, async () => 'missing', async () => ({
+      data: null,
+      error: {
+        name: 'StorageUnknownError',
+        message: 'fetch failed',
+        originalError: new TypeError('fetch failed'),
+      },
+    }));
+    const logs: string[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => {
+      logs.push(args.map((arg) => String(arg)).join(' '));
+    };
+    try {
+      const handlerStorage = fakeStorage();
+      handlerStorage.readMarker = () => failed.readMarker(VIDEO_ID);
+      let called = false;
+      const response = await handleYoutubeUpload(uploadRequest({ videoId: VIDEO_ID }, `Bearer ${START_SECRET}`), {
+        storage: handlerStorage,
+        fetchImpl: (async () => {
+          called = true;
+          throw new Error('youtube should not run');
+        }) as typeof fetch,
+      });
+      const text = await response.text();
+      assert.equal(response.status, 500);
+      assert.match(text, /marker_read_failed/);
+      assert.equal(text.includes('fetch failed'), false);
+      assert.equal(called, false);
+      assert.equal(
+        logs.some((line) => line === 'youtube_upload stage=marker_read_failed status=none code=unknown'),
+        true,
+      );
+    } finally {
+      console.error = original;
+    }
+  });
+
   await test('ログは段階とステータスだけを出す', async () => {
     for (const file of SOURCE_FILES) {
       const source = readFileSync(file, 'utf8');

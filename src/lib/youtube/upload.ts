@@ -239,14 +239,20 @@ export async function handleYoutubeUpload(request: Request, deps: UploadDeps = {
 export function createSupabaseUploadStorage(
   fetchImpl: typeof fetch = fetch,
   listMp4Size: ListMp4Size = defaultListMp4Size,
+  downloadObject?: ObjectDownload,
 ): UploadStorage {
   return {
     async readMarker(videoId) {
-      const supabase = getSupabaseAdmin();
-      const { data, error } = await supabase.storage.from(BUCKET).download(markerPath(videoId));
+      const downloaded = downloadObject
+        ? await downloadObject(markerPath(videoId))
+        : await getSupabaseAdmin().storage.from(BUCKET).download(markerPath(videoId));
+      const { data, error } = downloaded;
       if (error) {
-        if (isNotFound(error)) return 'absent';
+        if (await isNotFound(error)) return 'absent';
         throw new UploadStageError('marker_read_failed', storageStatus(error) || null, storageErrorCode(error));
+      }
+      if (!data) {
+        throw new UploadStageError('marker_read_failed', null, 'unknown');
       }
       const text = (await data.text()).trim();
       if (!YOUTUBE_ID_PATTERN.test(text)) return 'invalid';
@@ -690,25 +696,75 @@ function storageErrorCode(error: unknown): string {
   return 'unknown';
 }
 
-function isNotFound(error: unknown): boolean {
+const OBJECT_NOT_FOUND_MESSAGE = 'Object not found';
+const OBJECT_NOT_FOUND_CODE = 'NoSuchKey';
+const MAX_STORAGE_ERROR_BODY = 2048;
+
+type ObjectDownload = (path: string) => Promise<{ data: { text: () => Promise<string> } | null; error: unknown }>;
+
+function isNotFound(error: unknown): Promise<boolean> {
+  return classifyMissingObject(error);
+}
+
+async function classifyMissingObject(error: unknown): Promise<boolean> {
+  if (explicitObjectNotFound(error)) return true;
   const status = storageStatus(error);
-  if (status === 400 || status === 404) return true;
-  const message = error && typeof error === 'object' && 'message' in error ? String(error.message) : '';
-  return message.toLowerCase().includes('not found');
+  if (status === 404) return true;
+  if (status !== 400) return false;
+  const body = await storageErrorBody(error);
+  return explicitObjectNotFound(body);
+}
+
+function explicitObjectNotFound(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const record = error as { message?: unknown; code?: unknown };
+  return record.message === OBJECT_NOT_FOUND_MESSAGE || record.code === OBJECT_NOT_FOUND_CODE;
+}
+
+async function storageErrorBody(error: unknown): Promise<unknown> {
+  if (!error || typeof error !== 'object' || !('originalError' in error)) return null;
+  const original = (error as { originalError?: unknown }).originalError;
+  if (!original || typeof original !== 'object' || !('text' in original)) return null;
+  const read = (original as { text?: unknown }).text;
+  if (typeof read !== 'function') return null;
+  try {
+    const raw = await read.call(original);
+    if (typeof raw !== 'string' || raw.length === 0 || raw.length > MAX_STORAGE_ERROR_BODY) return null;
+    return JSON.parse(raw) as unknown;
+  } catch {
+    return null;
+  }
 }
 
 function isAlreadyExists(error: unknown): boolean {
-  if (storageStatus(error) === 409) return true;
+  if (storageStatus(error) === 409 || storageStatusCode(error) === 409) return true;
   const message = error && typeof error === 'object' && 'message' in error ? String(error.message) : '';
   return message.toLowerCase().includes('already exists') || message.toLowerCase().includes('duplicate');
 }
 
 function storageStatus(error: unknown): number {
   if (!error || typeof error !== 'object') return 0;
-  const record = error as { status?: unknown; statusCode?: unknown };
-  const value = record.status ?? record.statusCode;
-  const status = typeof value === 'number' ? value : Number(value);
-  return Number.isFinite(status) ? status : 0;
+  const record = error as { status?: unknown; originalError?: unknown };
+  const direct = httpStatus(record.status);
+  if (direct !== 0) return direct;
+  if (!record.originalError || typeof record.originalError !== 'object') return 0;
+  return httpStatus((record.originalError as { status?: unknown }).status);
+}
+
+function storageStatusCode(error: unknown): number {
+  if (!error || typeof error !== 'object') return 0;
+  return httpStatus((error as { statusCode?: unknown }).statusCode);
+}
+
+function httpStatus(value: unknown): number {
+  const status =
+    typeof value === 'number'
+      ? value
+      : typeof value === 'string' && /^\d{3}$/.test(value)
+        ? Number(value)
+        : Number.NaN;
+  if (!Number.isInteger(status) || status < 100 || status > 599) return 0;
+  return status;
 }
 
 function toHeaders(raw: IncomingHttpHeaders): Headers {
