@@ -37,6 +37,25 @@ const PUBLIC_TOKEN_ERRORS = new Set([
   'token_exchange_failed',
 ]);
 
+const REFRESH_ENV = [
+  'YOUTUBE_OAUTH_CLIENT_ID',
+  'YOUTUBE_OAUTH_CLIENT_SECRET',
+  'YOUTUBE_REFRESH_TOKEN',
+] as const;
+
+const VERIFY_ENV = [
+  'YOUTUBE_OAUTH_CLIENT_ID',
+  'YOUTUBE_OAUTH_CLIENT_SECRET',
+  'YOUTUBE_OAUTH_START_SECRET',
+  'YOUTUBE_REFRESH_TOKEN',
+] as const;
+
+const VERIFY_REASONS = new Set([
+  ...PUBLIC_TOKEN_ERRORS,
+  'access_token_missing',
+  'expires_in_missing',
+]);
+
 export type OauthConfig = {
   clientId: string;
   clientSecret: string;
@@ -65,6 +84,14 @@ export type CallbackDeps = {
 
 export type TakeDeps = {
   store?: HandoffStore;
+};
+
+export type AccessTokenResult =
+  | { ok: true; accessToken: string; expiresIn: number }
+  | { ok: false; reason: string };
+
+export type VerifyDeps = {
+  fetchImpl?: typeof fetch;
 };
 
 export function readOauthConfig(): OauthConfigResult {
@@ -329,6 +356,42 @@ export async function handleTakeRefreshToken(
   });
 }
 
+export async function handleOauthVerify(request: Request, deps: VerifyDeps = {}): Promise<Response> {
+  const missing = VERIFY_ENV.filter((key) => !process.env[key]?.trim());
+  if (missing.length > 0) {
+    return htmlResponse('設定エラー', [`環境変数が未設定です: ${missing.join(', ')}`], 500);
+  }
+
+  const startSecret = process.env.YOUTUBE_OAUTH_START_SECRET!.trim();
+  const url = new URL(request.url);
+  if (
+    queryCarriesSecret(url, startSecret) ||
+    queryContainsValue(url, process.env.YOUTUBE_OAUTH_CLIENT_SECRET!.trim()) ||
+    queryContainsValue(url, process.env.YOUTUBE_REFRESH_TOKEN!.trim())
+  ) {
+    return htmlResponse('拒否しました', ['秘密情報は URL に含められません。'], 400);
+  }
+
+  if (!authorizeStart(request, startSecret)) {
+    return new Response('認証が必要です', {
+      status: 401,
+      headers: {
+        'WWW-Authenticate': 'Basic realm="YouTube OAuth", charset="UTF-8"',
+        'Cache-Control': 'no-store',
+        'Content-Type': 'text/plain; charset=utf-8',
+      },
+    });
+  }
+
+  const refreshed = await refreshAccessToken(deps.fetchImpl ?? fetch);
+  if (!refreshed.ok) {
+    const reason = VERIFY_REASONS.has(refreshed.reason) ? refreshed.reason : 'token_exchange_failed';
+    return htmlResponse('失敗', [reason], 502);
+  }
+
+  return htmlResponse('成功', ['アクセストークンを取得できました。'], 200);
+}
+
 export function createSupabaseHandoffStore(client?: SupabaseClient): HandoffStore {
   return {
     async save(refreshToken: string) {
@@ -412,6 +475,55 @@ async function exchangeAuthCode(
   return { ok: true, refreshToken: payload.refresh_token };
 }
 
+export async function refreshAccessToken(fetchImpl: typeof fetch = fetch): Promise<AccessTokenResult> {
+  const missing = REFRESH_ENV.filter((key) => !process.env[key]?.trim());
+  if (missing.length > 0) {
+    return { ok: false, reason: `環境変数が未設定です: ${missing.join(', ')}` };
+  }
+
+  const clientId = process.env.YOUTUBE_OAUTH_CLIENT_ID!.trim();
+  const clientSecret = process.env.YOUTUBE_OAUTH_CLIENT_SECRET!.trim();
+  const refreshToken = process.env.YOUTUBE_REFRESH_TOKEN!.trim();
+  let response: Response;
+  try {
+    response = await fetchImpl(GOOGLE_TOKEN_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: clientId,
+        client_secret: clientSecret,
+        refresh_token: refreshToken,
+        grant_type: 'refresh_token',
+      }),
+      cache: 'no-store',
+      signal: AbortSignal.timeout(15000),
+    });
+  } catch {
+    return { ok: false, reason: 'token_exchange_failed' };
+  }
+
+  let payload: { error?: unknown; access_token?: unknown; expires_in?: unknown };
+  try {
+    payload = (await response.json()) as { error?: unknown; access_token?: unknown; expires_in?: unknown };
+  } catch {
+    return { ok: false, reason: 'token_exchange_failed' };
+  }
+
+  if (!response.ok) {
+    return { ok: false, reason: publicTokenError(payload.error) };
+  }
+
+  if (!isUsableAccessToken(payload.access_token)) {
+    return { ok: false, reason: 'access_token_missing' };
+  }
+  const expiresIn = readExpiresIn(payload.expires_in);
+  if (expiresIn === null) {
+    return { ok: false, reason: 'expires_in_missing' };
+  }
+
+  return { ok: true, accessToken: payload.access_token, expiresIn };
+}
+
 async function assertHandoffTable(): Promise<void> {
   const supabase = getSupabaseAdmin();
   const { error } = await supabase.from(HANDOFF_TABLE).select('id').limit(1);
@@ -481,6 +593,15 @@ function readStateCookie(cookieHeader: string | null): string {
 
 function publicOauthError(value: string): string {
   return /^[A-Za-z0-9_]{1,64}$/.test(value) ? value : 'unknown_error';
+}
+
+function isUsableAccessToken(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= 8192 && !/\s/.test(value);
+}
+
+function readExpiresIn(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0 || value > 604800) return null;
+  return Math.floor(value);
 }
 
 function publicTokenError(value: unknown): string {

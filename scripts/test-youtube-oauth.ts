@@ -3,11 +3,14 @@ import { readFileSync } from 'node:fs';
 import type { SupabaseClient } from '@supabase/supabase-js';
 
 import { GET as startRoute } from '../src/app/api/youtube/oauth/start/route';
+import { GET as verifyRoute } from '../src/app/api/youtube/oauth/verify/route';
 import {
   createSupabaseHandoffStore,
   handleOauthCallback,
   handleOauthStart,
+  handleOauthVerify,
   handleTakeRefreshToken,
+  refreshAccessToken,
   type HandoffStore,
 } from '../src/lib/youtube/oauth';
 
@@ -24,6 +27,7 @@ const ENV_KEYS = [
   'YOUTUBE_OAUTH_CLIENT_SECRET',
   'YOUTUBE_OAUTH_REDIRECT_URI',
   'YOUTUBE_OAUTH_START_SECRET',
+  'YOUTUBE_REFRESH_TOKEN',
   'SUPABASE_URL',
   'SUPABASE_SERVICE_ROLE_KEY',
 ] as const;
@@ -33,6 +37,7 @@ const SOURCE_FILES = [
   'src/app/api/youtube/oauth/start/route.ts',
   'src/app/api/youtube/oauth/callback/route.ts',
   'src/app/api/youtube/oauth/refresh-token/route.ts',
+  'src/app/api/youtube/oauth/verify/route.ts',
 ];
 
 type MemoryStore = HandoffStore & { saved: string | null; saves: number; takes: number };
@@ -493,6 +498,118 @@ async function main() {
       assert.equal(error.message, 'handoff_table_missing');
       return true;
     });
+  });
+
+  await test('確認 API は未認証と誤った合言葉を拒否する', async () => {
+    applyEnv({ ...configuredEnv(), YOUTUBE_REFRESH_TOKEN: REFRESH_TOKEN });
+    let called = false;
+    const fetchImpl: typeof fetch = async () => {
+      called = true;
+      throw new Error('fetch should not run');
+    };
+    const url = 'https://autobriefs-production.up.railway.app/api/youtube/oauth/verify';
+    const missing = await verifyRoute(new Request(url));
+    const wrong = await handleOauthVerify(new Request(url, { headers: { authorization: basic('oauth', 'wrong-secret') } }), {
+      fetchImpl,
+    });
+    assert.equal(missing.status, 401);
+    assert.match(missing.headers.get('www-authenticate') ?? '', /Basic/);
+    assert.equal(missing.headers.get('cache-control'), 'no-store');
+    assert.equal(wrong.status, 401);
+    assert.equal(called, false);
+    assertNoSecrets(await missing.text());
+    assertNoSecrets(await wrong.text());
+  });
+
+  await test('確認 API は不足している環境変数の名前だけを返す', async () => {
+    applyEnv({ ...configuredEnv(), YOUTUBE_REFRESH_TOKEN: undefined });
+    let called = false;
+    const response = await handleOauthVerify(
+      new Request('https://autobriefs-production.up.railway.app/api/youtube/oauth/verify', {
+        headers: { authorization: `Bearer ${START_SECRET}`, accept: 'text/html' },
+      }),
+      {
+        fetchImpl: async () => {
+          called = true;
+          throw new Error('fetch should not run');
+        },
+      },
+    );
+    const body = await response.text();
+    assert.equal(response.status, 500);
+    assert.match(body, /YOUTUBE_REFRESH_TOKEN/);
+    assert.equal(called, false);
+    assertNoSecrets(body);
+  });
+
+  await test('アクセストークン更新の成功時は成功と表示し値は返さない', async () => {
+    applyEnv({ ...configuredEnv(), YOUTUBE_REFRESH_TOKEN: REFRESH_TOKEN });
+    const leaks = await captureOutput(async () => {
+      const refreshed = await refreshAccessToken(async (_url, init) => {
+        const sent = new URLSearchParams(String(init?.body ?? ''));
+        assert.equal(sent.get('grant_type'), 'refresh_token');
+        assert.equal(sent.get('refresh_token'), REFRESH_TOKEN);
+        assert.equal(sent.get('client_id'), CLIENT_ID);
+        assert.equal(sent.get('client_secret'), CLIENT_SECRET);
+        return new Response(
+          JSON.stringify({
+            access_token: ACCESS_TOKEN,
+            expires_in: 3599,
+            refresh_token: REFRESH_TOKEN,
+            token_type: 'Bearer',
+          }),
+          { status: 200 },
+        );
+      });
+      assert.equal(refreshed.ok, true);
+      if (refreshed.ok) {
+        assert.equal(refreshed.accessToken, ACCESS_TOKEN);
+        assert.equal(refreshed.expiresIn, 3599);
+      }
+
+      const response = await handleOauthVerify(
+        new Request('https://autobriefs-production.up.railway.app/api/youtube/oauth/verify', {
+          headers: { authorization: `Bearer ${START_SECRET}`, accept: 'text/html' },
+        }),
+        {
+          fetchImpl: async () =>
+            new Response(JSON.stringify({ access_token: ACCESS_TOKEN, expires_in: 3599 }), { status: 200 }),
+        },
+      );
+      const text = await response.text();
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get('cache-control'), 'no-store');
+      assert.match(text, /成功/);
+      assertNoSecrets(text);
+    });
+    assert.deepEqual(leaks, []);
+  });
+
+  await test('Google のエラー本文は確認 API に出さない', async () => {
+    applyEnv({ ...configuredEnv(), YOUTUBE_REFRESH_TOKEN: REFRESH_TOKEN });
+    const leaks = await captureOutput(async () => {
+      const response = await handleOauthVerify(
+        new Request('https://autobriefs-production.up.railway.app/api/youtube/oauth/verify', {
+          headers: { authorization: basic('oauth', START_SECRET), accept: 'text/html' },
+        }),
+        {
+          fetchImpl: async () =>
+            new Response(
+              JSON.stringify({
+                error: 'invalid_grant',
+                error_description: `revoked ${REFRESH_TOKEN} ${ACCESS_TOKEN} ${CLIENT_SECRET}`,
+              }),
+              { status: 400 },
+            ),
+        },
+      );
+      const text = await response.text();
+      assert.equal(response.status, 502);
+      assert.match(text, /invalid_grant/);
+      assert.equal(text.includes('revoked'), false);
+      assertNoSecrets(text);
+    });
+    assert.deepEqual(leaks, []);
   });
 
   await test('実装ファイルにログ出力が無い', async () => {
