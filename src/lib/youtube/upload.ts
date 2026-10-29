@@ -145,11 +145,42 @@ function sectionLines(text: string, name: 'TITLES' | 'DESCRIPTIONS'): string[] {
 }
 
 function extractTitle(lines: string[]): string | null {
-  const candidates = lines
-    .map((line) => ({ raw: line, cleaned: validateTitle(cleanTitleLine(line)) }))
-    .filter((item): item is { raw: string; cleaned: string } => item.cleaned !== null);
-  const preferred = candidates.find((item) => /タイトル\s*[AＡ]/.test(item.raw));
-  return (preferred ?? candidates[0])?.cleaned ?? null;
+  const candidates: Array<{ role: 'A' | 'B' | 'C' | null; title: string }> = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? '';
+    if (!line.trim()) continue;
+    const role = titleRole(line);
+    const sameLine = validateTitle(cleanTitleLine(line));
+    if (sameLine) {
+      candidates.push({ role, title: sameLine });
+      continue;
+    }
+    if (!role) continue;
+    const next = nextContentIndex(lines, index + 1);
+    if (next === null || titleRole(lines[next] ?? '')) continue;
+    const body = validateTitle(cleanTitleLine(lines[next] ?? ''));
+    if (!body) continue;
+    candidates.push({ role, title: body });
+    index = next;
+  }
+  const preferred = candidates.find((item) => item.role === 'A');
+  return (preferred ?? candidates[0])?.title ?? null;
+}
+
+function titleRole(line: string): 'A' | 'B' | 'C' | null {
+  const match = line.match(/タイトル\s*([ABCＡＢＣ])/u);
+  if (!match) return null;
+  if (match[1] === 'A' || match[1] === 'Ａ') return 'A';
+  if (match[1] === 'B' || match[1] === 'Ｂ') return 'B';
+  if (match[1] === 'C' || match[1] === 'Ｃ') return 'C';
+  return null;
+}
+
+function nextContentIndex(lines: string[], start: number): number | null {
+  for (let index = start; index < lines.length; index += 1) {
+    if ((lines[index] ?? '').trim()) return index;
+  }
+  return null;
 }
 
 function cleanTitleLine(line: string): string {

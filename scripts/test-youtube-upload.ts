@@ -764,6 +764,17 @@ async function main() {
 `);
     assert.equal(labeled.title, '検索向け');
     assert.equal(labeled.description, '一行目\n二行目');
+    const split = parseTitlesDocument(`=== TITLES ===
+・タイトルA（検索最適化型）：
+キヤノン決算と26年予想下方修正　医療機器不振で純利益微増に
+・タイトルB（クリック重視型）：
+別の候補
+
+=== DESCRIPTIONS ===
+説明です
+`);
+    assert.equal(split.title, 'キヤノン決算と26年予想下方修正 医療機器不振で純利益微増に');
+    assert.equal(split.title?.includes('タイトルA'), false);
   });
 
   await test('タイトルAが無ければ最初の有効な候補を使う', async () => {
