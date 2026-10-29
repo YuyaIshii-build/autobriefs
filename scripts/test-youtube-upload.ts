@@ -3,8 +3,10 @@ import { readFileSync } from 'node:fs';
 
 import { POST as uploadRoute } from '../src/app/api/youtube/upload/route';
 import {
+  chooseTitlesFile,
   createSupabaseUploadStorage,
   handleYoutubeUpload,
+  parseTitlesDocument,
   readByteSize,
   validateVideoId,
   type PutRequest,
@@ -32,12 +34,27 @@ const ENV_KEYS = [
 
 const SOURCE_FILES = ['src/lib/youtube/upload.ts', 'src/app/api/youtube/upload/route.ts'];
 
+const SAMPLE_TITLES = `=== TITLES ===
+・タイトルA（検索最適化型）：トヨタ、決算で増益
+・タイトルB（クリック重視型）：トヨタ株はどうなる
+・タイトルC（投資判断重視型）：トヨタ決算の見方
+
+=== DESCRIPTIONS ===
+【概要】
+トヨタが決算を発表した。
+`;
+
+const SAMPLE_TITLE = 'トヨタ、決算で増益';
+const SAMPLE_DESCRIPTION = '【概要】\nトヨタが決算を発表した。';
+
 type FakeStorage = UploadStorage & {
   marker: string | null;
   lock: 'absent' | 'held';
   lockDeleted: boolean;
   opens: number[];
   markerSaves: string[];
+  titles: string | 'missing';
+  titlesReads: number;
 };
 
 function streamOf(length: number): ReadableStream<Uint8Array> {
@@ -56,6 +73,8 @@ function fakeStorage(size: number | 'missing' | 'unknown' = 8): FakeStorage {
     lockDeleted: false,
     opens: [],
     markerSaves: [],
+    titles: SAMPLE_TITLES,
+    titlesReads: 0,
     async readMarker() {
       if (state.marker === 'bad') return 'invalid';
       if (!state.marker) return 'absent';
@@ -81,6 +100,10 @@ function fakeStorage(size: number | 'missing' | 'unknown' = 8): FakeStorage {
     async saveMarker(_videoId, youtubeVideoId) {
       state.markerSaves.push(youtubeVideoId);
       state.marker = youtubeVideoId;
+    },
+    async readTitlesFile() {
+      state.titlesReads += 1;
+      return state.titles;
     },
   };
   return state;
@@ -313,6 +336,7 @@ async function main() {
     assert.equal(body.alreadyUploaded, true);
     assert.equal(called, false);
     assert.equal(storage.markerSaves.length, 0);
+    assert.equal(storage.titlesReads, 0);
   });
 
   await test('成功時はprivateで送りマーカーを保存する', async () => {
@@ -342,9 +366,13 @@ async function main() {
       assert.equal(typeof sink.calls[0]?.body?.getReader, 'function');
       assert.equal(sink.calls[0]?.headers['Content-Length'], '8');
     });
-    const sent = JSON.parse(sessionBody) as { status: { privacyStatus: string }; snippet: { title: string } };
+    const sent = JSON.parse(sessionBody) as {
+      status: { privacyStatus: string };
+      snippet: { title: string; description: string };
+    };
     assert.equal(sent.status.privacyStatus, 'private');
-    assert.equal(sent.snippet.title, `AutoBriefs test ${VIDEO_ID}`);
+    assert.equal(sent.snippet.title, SAMPLE_TITLE);
+    assert.equal(sent.snippet.description, SAMPLE_DESCRIPTION);
     assert.equal(sessionBody.includes('public'), false);
     assert.equal(sessionBody.includes('evil.example'), false);
     assert.deepEqual(leaks, []);
@@ -719,6 +747,125 @@ async function main() {
     } finally {
       console.error = original;
     }
+  });
+
+  await test('タイトルAを採用しラベルを外す', async () => {
+    const parsed = parseTitlesDocument(SAMPLE_TITLES);
+    assert.equal(parsed.title, SAMPLE_TITLE);
+    assert.equal(parsed.description, SAMPLE_DESCRIPTION);
+    const labeled = parseTitlesDocument(`=== TITLES ===
+1. タイトルB（クリック重視型）：クリック向け
+タイトルC（投資判断重視型）：判断向け
+・タイトルA（検索最適化型）：検索向け
+
+=== DESCRIPTIONS ===
+一行目
+二行目
+`);
+    assert.equal(labeled.title, '検索向け');
+    assert.equal(labeled.description, '一行目\n二行目');
+  });
+
+  await test('タイトルAが無ければ最初の有効な候補を使う', async () => {
+    const parsed = parseTitlesDocument(`=== TITLES ===
+・タイトルB（CTR最大化型）：クリック向け
+タイトルC（投資判断訴求型）：判断向け
+
+=== DESCRIPTIONS ===
+説明です
+`);
+    assert.equal(parsed.title, 'クリック向け');
+    assert.equal(parsed.description, '説明です');
+  });
+
+  await test('タイトルファイルの選択はファイル名の日時を優先する', async () => {
+    assert.equal(
+      chooseTitlesFile([
+        { name: 'titles-2026-10-01T00:00:00.000Z.txt', updatedAt: '2026-12-01T00:00:00.000Z' },
+        { name: 'titles-2026-10-29T00:00:00.000Z.txt', updatedAt: '2026-01-01T00:00:00.000Z' },
+      ]),
+      'titles-2026-10-29T00:00:00.000Z.txt',
+    );
+    assert.equal(
+      chooseTitlesFile([
+        { name: 'titles-notes.txt', updatedAt: '2026-01-01T00:00:00.000Z' },
+        { name: 'titles-2026-10-29T00:00:00.000Z.txt', updatedAt: '2026-02-01T00:00:00.000Z' },
+      ]),
+      'titles-2026-10-29T00:00:00.000Z.txt',
+    );
+  });
+
+  await test('ファイル欠如と文字数超過はアップロードしない', async () => {
+    applyEnv(configuredEnv());
+    const missing = fakeStorage();
+    missing.titles = 'missing';
+    let called = false;
+    const missingResponse = await handleYoutubeUpload(uploadRequest({ videoId: VIDEO_ID }, `Bearer ${START_SECRET}`), {
+      storage: missing,
+      fetchImpl: (async () => {
+        called = true;
+        throw new Error('youtube should not run');
+      }) as typeof fetch,
+    });
+    assert.equal(missingResponse.status, 422);
+    assert.match(await missingResponse.text(), /title_unavailable/);
+    assert.equal(called, false);
+    assert.equal(missing.lock, 'absent');
+
+    const longTitle = fakeStorage();
+    longTitle.titles = `=== TITLES ===
+タイトルA（検索最適化型）：${'あ'.repeat(101)}
+
+=== DESCRIPTIONS ===
+説明です
+`;
+    const titleResponse = await handleYoutubeUpload(uploadRequest({ videoId: VIDEO_ID }, `Bearer ${START_SECRET}`), {
+      storage: longTitle,
+      fetchImpl: (async () => {
+        throw new Error('youtube should not run');
+      }) as typeof fetch,
+    });
+    assert.equal(titleResponse.status, 422);
+    assert.match(await titleResponse.text(), /title_unavailable/);
+
+    const longDescription = fakeStorage();
+    longDescription.titles = `=== TITLES ===
+タイトルA（検索最適化型）：短い題
+
+=== DESCRIPTIONS ===
+${'あ'.repeat(5001)}
+`;
+    const descriptionResponse = await handleYoutubeUpload(uploadRequest({ videoId: VIDEO_ID }, `Bearer ${START_SECRET}`), {
+      storage: longDescription,
+      fetchImpl: (async () => {
+        throw new Error('youtube should not run');
+      }) as typeof fetch,
+    });
+    assert.equal(descriptionResponse.status, 422);
+    assert.match(await descriptionResponse.text(), /description_unavailable/);
+    assert.equal(longDescription.lock, 'absent');
+  });
+
+  await test('明示したtitleとdescriptionをprivateで送る', async () => {
+    applyEnv(configuredEnv());
+    const storage = fakeStorage();
+    let sessionBody = '';
+    const response = await handleYoutubeUpload(
+      uploadRequest(
+        { videoId: VIDEO_ID, title: '明示タイトル', description: '明示した説明', privacyStatus: 'public' },
+        `Bearer ${START_SECRET}`,
+      ),
+      { storage, fetchImpl: tokenFetch((body) => { sessionBody = body; }), putImpl: successPut().put },
+    );
+    const body = await response.json() as { privacyStatus: string; alreadyUploaded: boolean };
+    const sent = JSON.parse(sessionBody) as { status: { privacyStatus: string }; snippet: { title: string; description: string } };
+    assert.equal(response.status, 200);
+    assert.equal(body.privacyStatus, 'private');
+    assert.equal(body.alreadyUploaded, false);
+    assert.equal(sent.snippet.title, '明示タイトル');
+    assert.equal(sent.snippet.description, '明示した説明');
+    assert.equal(sent.status.privacyStatus, 'private');
+    assert.equal(storage.titlesReads, 0);
   });
 
   await test('ログは段階とステータスだけを出す', async () => {

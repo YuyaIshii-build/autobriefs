@@ -9,7 +9,9 @@ const VIDEO_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 const YOUTUBE_ID_PATTERN = /^[A-Za-z0-9_-]{11}$/;
 const MAX_MP4_BYTES = 256 * 1024 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = 200_000;
-const DESCRIPTION = 'AutoBriefs private upload test.';
+const MAX_REQUEST_BYTES = 16_384;
+const MAX_TITLE_LENGTH = 100;
+const MAX_DESCRIPTION_LENGTH = 5_000;
 const SESSION_URL = 'https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet%2Cstatus';
 
 const REQUIRED_ENV = [
@@ -42,6 +44,8 @@ const SAFE_REASONS = new Set([
   'marker_invalid',
   'privacy_mismatch',
   'session_start_failed',
+  'title_unavailable',
+  'description_unavailable',
   'storage_failed',
   'quotaExceeded',
   'uploadLimitExceeded',
@@ -60,6 +64,12 @@ export type UploadStorage = {
   createLock(videoId: string): Promise<'created' | 'exists' | 'failed'>;
   deleteLock(videoId: string): Promise<void>;
   saveMarker(videoId: string, youtubeVideoId: string): Promise<void>;
+  readTitlesFile(videoId: string): Promise<string | 'missing'>;
+};
+
+type UploadMetadata = {
+  title: string;
+  description: string;
 };
 
 export type PutRequest = {
@@ -95,6 +105,141 @@ export function validateVideoId(value: unknown): string | null {
   return videoId;
 }
 
+const TITLES_FILE_PATTERN = /^titles-(.+)\.txt$/;
+const TITLE_LABEL_PATTERN = /^(?:[・●*\-]\s*)?タイトル\s*[ABCＡＢＣ]\s*(?:（[^）]{0,40}）|\([^)]{0,40}\))?\s*[：:]\s*/u;
+
+export function chooseTitlesFile(files: Array<{ name: string; updatedAt?: string | null }>): string | null {
+  const matched = files.filter((file) => TITLES_FILE_PATTERN.test(file.name) && !file.name.includes('/'));
+  if (matched.length === 0) return null;
+  if (matched.length === 1) return matched[0].name;
+  const stamped = matched.map((file) => ({ file, stamp: filenameTime(file.name) }));
+  if (stamped.every((item) => item.stamp !== null)) {
+    stamped.sort((left, right) => right.stamp! - left.stamp! || left.file.name.localeCompare(right.file.name));
+    return stamped[0].file.name;
+  }
+  const timed = matched.map((file) => ({ file, updated: timeMs(file.updatedAt) }));
+  if (timed.every((item) => item.updated !== null)) {
+    timed.sort((left, right) => right.updated! - left.updated! || left.file.name.localeCompare(right.file.name));
+    return timed[0].file.name;
+  }
+  return null;
+}
+
+export function parseTitlesDocument(text: string): { title: string | null; description: string | null } {
+  return {
+    title: validateTitle(extractTitle(sectionLines(text, 'TITLES'))),
+    description: validateDescription(extractDescription(sectionLines(text, 'DESCRIPTIONS'))),
+  };
+}
+
+function sectionLines(text: string, name: 'TITLES' | 'DESCRIPTIONS'): string[] {
+  const lines = text.split(/\r?\n/);
+  const start = lines.findIndex((line) => line.trim() === `=== ${name} ===`);
+  if (start < 0) return [];
+  const body: string[] = [];
+  for (const line of lines.slice(start + 1)) {
+    if (/^===\s+\S.*===$/.test(line.trim())) break;
+    body.push(line);
+  }
+  return body;
+}
+
+function extractTitle(lines: string[]): string | null {
+  const candidates = lines
+    .map((line) => ({ raw: line, cleaned: validateTitle(cleanTitleLine(line)) }))
+    .filter((item): item is { raw: string; cleaned: string } => item.cleaned !== null);
+  const preferred = candidates.find((item) => /タイトル\s*[AＡ]/.test(item.raw));
+  return (preferred ?? candidates[0])?.cleaned ?? null;
+}
+
+function cleanTitleLine(line: string): string {
+  let text = line.trim().replace(/^[\s・●*\-]+/u, '');
+  text = text.replace(/^\d+[.、．]\s*/, '');
+  text = text.replace(TITLE_LABEL_PATTERN, '');
+  text = text.replace(/^\d+[.、．]\s*/, '');
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+function extractDescription(lines: string[]): string | null {
+  const content = lines.map((line) => line.replace(/\s+$/u, '')).join('\n').trim();
+  if (!content || content === '(no descriptions)') return null;
+  const meaningful = content
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  if (meaningful.length === 0 || meaningful.every((line) => line === '(no descriptions)')) return null;
+  return content;
+}
+
+export function validateTitle(value: string | null): string | null {
+  if (!value) return null;
+  const title = value.replace(/\s+/g, ' ').trim();
+  if (!title || title.length > MAX_TITLE_LENGTH || title.includes('<') || title.includes('>')) return null;
+  return title;
+}
+
+export function validateDescription(value: string | null): string | null {
+  if (!value) return null;
+  const description = value.trim();
+  if (!description || description === '(no descriptions)' || description.length > MAX_DESCRIPTION_LENGTH) return null;
+  return description;
+}
+
+function filenameTime(name: string): number | null {
+  const raw = name.slice('titles-'.length, -'.txt'.length).trim();
+  const compact = raw.match(/^(\d{4})(\d{2})(\d{2})(?:T|[-_])?(\d{2})(\d{2})(\d{2})$/);
+  if (compact) {
+    const ms = Date.parse(`${compact[1]}-${compact[2]}-${compact[3]}T${compact[4]}:${compact[5]}:${compact[6]}Z`);
+    return Number.isFinite(ms) ? ms : null;
+  }
+  const minutes = raw.match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})$/);
+  if (minutes) {
+    const ms = Date.parse(`${minutes[1]}-${minutes[2]}-${minutes[3]}T${minutes[4]}:${minutes[5]}:00Z`);
+    return Number.isFinite(ms) ? ms : null;
+  }
+  if (!/\d/.test(raw)) return null;
+  const parsed = Date.parse(raw);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function timeMs(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function optionalText(value: unknown): 'omit' | 'invalid' | string {
+  if (value === undefined || value === null) return 'omit';
+  if (typeof value !== 'string') return 'invalid';
+  return value;
+}
+
+async function resolveMetadata(
+  record: { title?: unknown; description?: unknown },
+  videoId: string,
+  storage: UploadStorage,
+): Promise<{ ok: true; title: string; description: string } | { ok: false; error: 'title_unavailable' | 'description_unavailable' }> {
+  const titleInput = optionalText(record.title);
+  const descriptionInput = optionalText(record.description);
+  if (titleInput === 'invalid') return { ok: false, error: 'title_unavailable' };
+  if (descriptionInput === 'invalid') return { ok: false, error: 'description_unavailable' };
+
+  let parsed: { title: string | null; description: string | null } | null = null;
+  if (titleInput === 'omit' || descriptionInput === 'omit') {
+    const text = await storage.readTitlesFile(videoId);
+    if (text === 'missing') {
+      return { ok: false, error: titleInput === 'omit' ? 'title_unavailable' : 'description_unavailable' };
+    }
+    parsed = parseTitlesDocument(text);
+  }
+
+  const title = titleInput === 'omit' ? parsed?.title ?? null : validateTitle(titleInput);
+  if (!title) return { ok: false, error: 'title_unavailable' };
+  const description = descriptionInput === 'omit' ? parsed?.description ?? null : validateDescription(descriptionInput);
+  if (!description) return { ok: false, error: 'description_unavailable' };
+  return { ok: true, title, description };
+}
+
 export function readByteSize(value: unknown): number | null {
   const size =
     typeof value === 'number' ? value : typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : Number.NaN;
@@ -120,13 +265,14 @@ export async function handleYoutubeUpload(request: Request, deps: UploadDeps = {
   let payload: unknown;
   try {
     const raw = await request.text();
-    if (raw.length > 4096) return json({ error: 'invalid_video_id' }, 400);
+    if (raw.length > MAX_REQUEST_BYTES) return json({ error: 'invalid_video_id' }, 400);
     payload = JSON.parse(raw) as unknown;
   } catch {
     return json({ error: 'invalid_video_id' }, 400);
   }
 
-  const record = payload && typeof payload === 'object' ? (payload as { videoId?: unknown }) : {};
+  const record =
+    payload && typeof payload === 'object' ? (payload as { videoId?: unknown; title?: unknown; description?: unknown }) : {};
   const videoId = validateVideoId(record.videoId);
   if (!videoId) return json({ error: 'invalid_video_id' }, 400);
 
@@ -146,6 +292,15 @@ export async function handleYoutubeUpload(request: Request, deps: UploadDeps = {
       { youtubeVideoId: marker.youtubeVideoId, privacyStatus: 'private', alreadyUploaded: true },
       200,
     );
+  }
+
+  let metadata: UploadMetadata;
+  try {
+    const resolved = await resolveMetadata(record, videoId, storage);
+    if (!resolved.ok) return json({ error: resolved.error }, 422);
+    metadata = resolved;
+  } catch (error) {
+    return failStage(error, 'title_unavailable');
   }
 
   let size: number | 'missing' | 'unknown';
@@ -186,7 +341,7 @@ export async function handleYoutubeUpload(request: Request, deps: UploadDeps = {
       return json({ error: 'stream_unavailable' }, 422);
     }
 
-    const session = await startUploadSession(fetchImpl, refreshed.accessToken, videoId, size);
+    const session = await startUploadSession(fetchImpl, refreshed.accessToken, size, metadata);
     if (!session.ok) {
       await cancelStream(mp4);
       await storage.deleteLock(videoId);
@@ -320,14 +475,42 @@ export function createSupabaseUploadStorage(
       if (existing !== 'absent' && existing !== 'invalid' && existing.youtubeVideoId === youtubeVideoId) return;
       throw new UploadStageError('marker_write_failed', storageStatus(error) || null, storageErrorCode(error));
     },
+    async readTitlesFile(videoId) {
+      const supabase = getSupabaseAdmin();
+      const { data, error } = await supabase.storage.from(BUCKET).list(videoId, {
+        limit: 100,
+        search: 'titles-',
+      });
+      if (error) {
+        throw new UploadStageError('title_unavailable', storageStatus(error) || null, storageErrorCode(error));
+      }
+      const name = chooseTitlesFile(
+        (data ?? []).map((item) => ({
+          name: item.name,
+          updatedAt: item.updated_at ?? item.created_at ?? null,
+        })),
+      );
+      if (!name) return 'missing';
+      const downloaded = await supabase.storage.from(BUCKET).download(`${videoId}/${name}`);
+      if (downloaded.error) {
+        if (await isNotFound(downloaded.error)) return 'missing';
+        throw new UploadStageError(
+          'title_unavailable',
+          storageStatus(downloaded.error) || null,
+          storageErrorCode(downloaded.error),
+        );
+      }
+      if (!downloaded.data) return 'missing';
+      return (await downloaded.data.text()).slice(0, MAX_REQUEST_BYTES);
+    },
   };
 }
 
 async function startUploadSession(
   fetchImpl: typeof fetch,
   accessToken: string,
-  videoId: string,
   size: number,
+  metadata: UploadMetadata,
 ): Promise<{ ok: true; url: string } | { ok: false; error: string }> {
   let response: Response;
   try {
@@ -344,8 +527,8 @@ async function startUploadSession(
       },
       body: JSON.stringify({
         snippet: {
-          title: `AutoBriefs test ${videoId}`,
-          description: DESCRIPTION,
+          title: metadata.title,
+          description: metadata.description,
         },
         status: { privacyStatus: 'private' },
       }),
