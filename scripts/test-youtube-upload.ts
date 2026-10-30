@@ -9,6 +9,7 @@ import {
   createSupabaseUploadStorage,
   FIXED_VIDEO_TAGS,
   handleYoutubeUpload,
+  nextYoutubePublishAt,
   parseTitlesDocument,
   readByteSize,
   validateVideoId,
@@ -62,6 +63,10 @@ type FakeStorage = UploadStorage & {
   thumbnailSet: 'present' | 'absent' | 'unknown';
   thumbnailLock: 'absent' | 'setting' | 'incomplete';
   thumbnailSetSaves: number;
+  schedule: { youtubeVideoId: string; publishAt: string } | null | 'invalid' | 'unknown';
+  scheduleLock: 'absent' | 'setting' | 'incomplete';
+  scheduleSaves: Array<{ youtubeVideoId: string; publishAt: string }>;
+  failScheduleSave: boolean;
 };
 
 function streamOf(length: number): ReadableStream<Uint8Array> {
@@ -85,6 +90,10 @@ function fakeStorage(size: number | 'missing' | 'unknown' = 8): FakeStorage {
     thumbnailSet: 'present',
     thumbnailLock: 'absent',
     thumbnailSetSaves: 0,
+    schedule: { youtubeVideoId: YOUTUBE_ID, publishAt: '2026-10-31T10:15:00Z' },
+    scheduleLock: 'absent',
+    scheduleSaves: [],
+    failScheduleSave: false,
     async readMarker() {
       if (state.marker === 'bad') return 'invalid';
       if (!state.marker) return 'absent';
@@ -135,6 +144,30 @@ function fakeStorage(size: number | 'missing' | 'unknown' = 8): FakeStorage {
     async saveThumbnailSet() {
       state.thumbnailSetSaves += 1;
       state.thumbnailSet = 'present';
+    },
+    async readSchedule() {
+      if (state.schedule === 'invalid' || state.schedule === 'unknown') return state.schedule;
+      if (!state.schedule) return 'absent';
+      return state.schedule;
+    },
+    async createScheduleLock() {
+      if (state.scheduleLock !== 'absent') return 'exists';
+      state.scheduleLock = 'setting';
+      return 'created';
+    },
+    async readScheduleLock() {
+      return state.scheduleLock;
+    },
+    async markScheduleLockIncomplete() {
+      state.scheduleLock = 'incomplete';
+    },
+    async deleteScheduleLock() {
+      state.scheduleLock = 'absent';
+    },
+    async saveSchedule(_videoId, youtubeVideoId, publishAt) {
+      if (state.failScheduleSave) throw new Error('schedule marker failed');
+      state.scheduleSaves.push({ youtubeVideoId, publishAt });
+      state.schedule = { youtubeVideoId, publishAt };
     },
   };
   return state;
@@ -246,6 +279,67 @@ function countingFetch(onThumb?: (body: Uint8Array) => void, thumbStatus = 200):
     throw new Error(`unexpected fetch ${target}`);
   }) as typeof fetch;
   return { fetchImpl, counts };
+}
+
+function listResponse(status: Record<string, unknown>): Response {
+  return new Response(JSON.stringify({ items: [{ id: YOUTUBE_ID, status }] }), { status: 200 });
+}
+
+function echoUpdate(body: string, url: string): Response {
+  const sent = JSON.parse(body) as { id: string; snippet?: unknown; status: { privacyStatus: string; publishAt: string } };
+  assert.equal(sent.snippet, undefined);
+  assert.equal(new URL(url).searchParams.get('part'), 'status');
+  assert.equal(sent.id, YOUTUBE_ID);
+  assert.equal(sent.status.privacyStatus, 'private');
+  return new Response(JSON.stringify({ id: sent.id, status: sent.status }), { status: 200 });
+}
+
+function scheduleFetch(handlers: {
+  list: () => Response | Promise<Response>;
+  update?: (body: string, url: string) => Response | Promise<Response>;
+  tokenStatus?: number;
+  onInsert?: (body: string) => void;
+}): { fetchImpl: typeof fetch; calls: string[]; updateBodies: string[] } {
+  const calls: string[] = [];
+  const updateBodies: string[] = [];
+  const fetchImpl = (async (url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    const target = String(url);
+    const method = init?.method ?? 'GET';
+    if (target.includes('oauth2.googleapis.com/token')) {
+      calls.push('token');
+      if (handlers.tokenStatus && handlers.tokenStatus !== 200) {
+        return new Response(JSON.stringify({ error: 'invalid_grant', error_description: REFRESH_TOKEN }), { status: handlers.tokenStatus });
+      }
+      return new Response(JSON.stringify({ access_token: ACCESS_TOKEN, expires_in: 3599 }), { status: 200 });
+    }
+    if (target.includes('/upload/youtube/v3/videos')) {
+      calls.push('insert');
+      handlers.onInsert?.(String(init?.body ?? ''));
+      return new Response(null, { status: 200, headers: { Location: SESSION_URL } });
+    }
+    if (target.includes('/upload/youtube/v3/thumbnails/set')) {
+      calls.push('thumb');
+      return new Response('{}', { status: 200 });
+    }
+    if (target.includes('/youtube/v3/videos') && method === 'PUT') {
+      calls.push('update');
+      const body = String(init?.body ?? '');
+      updateBodies.push(body);
+      const headers = new Headers(init?.headers);
+      assert.equal(headers.get('authorization'), `Bearer ${ACCESS_TOKEN}`);
+      return (handlers.update ?? echoUpdate)(body, target);
+    }
+    if (target.includes('/youtube/v3/videos')) {
+      calls.push('list');
+      assert.equal(method, 'GET');
+      assert.match(target, /[?&]part=status(&|$)/);
+      assert.match(target, new RegExp(`[?&]id=${YOUTUBE_ID}(&|$)`));
+      assert.equal(new Headers(init?.headers).get('authorization'), `Bearer ${ACCESS_TOKEN}`);
+      return handlers.list();
+    }
+    throw new Error(`unexpected fetch ${target}`);
+  }) as typeof fetch;
+  return { fetchImpl, calls, updateBodies };
 }
 
 function successPut(): { put: (request: PutRequest) => Promise<PutResponse>; calls: PutRequest[] } {
@@ -1286,6 +1380,426 @@ CATEGORY: business
     assert.equal(sent.snippet.description, SAMPLE_DESCRIPTION);
     assert.equal(sent.status.privacyStatus, 'private');
     assert.deepEqual(sent.snippet.tags, ['JT', '2914', 'たばこ', ...FIXED_VIDEO_TAGS]);
+  });
+
+  await test('アップロード、サムネイル、予約公開の順に実行する', async () => {
+    applyEnv(configuredEnv());
+    const storage = fakeStorage();
+    storage.thumbnailSet = 'absent';
+    storage.schedule = null;
+    let insertBody = '';
+    const youtube = scheduleFetch({
+      onInsert: (body) => {
+        insertBody = body;
+      },
+      list: () => listResponse({ privacyStatus: 'private' }),
+    });
+    const response = await handleYoutubeUpload(uploadRequest({ videoId: VIDEO_ID }, `Bearer ${START_SECRET}`), {
+      storage,
+      fetchImpl: youtube.fetchImpl,
+      putImpl: successPut().put,
+      ensureThumbnail: async () => ({ ok: true, bytes: pngBytes(), limitExceeded: [] }),
+      now: () => new Date('2026-10-30T09:00:00Z'),
+    });
+    const body = await response.json() as { scheduled: boolean; publishAt: string; thumbnailSet: boolean; alreadyUploaded: boolean; privacyStatus: string };
+    assert.equal(response.status, 200);
+    assert.equal(body.alreadyUploaded, false);
+    assert.equal(body.privacyStatus, 'private');
+    assert.equal(body.thumbnailSet, true);
+    assert.equal(body.scheduled, true);
+    assert.equal(body.publishAt, '2026-10-30T10:15:00Z');
+    assert.deepEqual(youtube.calls, ['token', 'insert', 'token', 'thumb', 'token', 'list', 'update']);
+    assert.equal(insertBody.includes('publishAt'), false);
+    assert.equal(insertBody.includes('snippet'), true);
+    const sent = JSON.parse(youtube.updateBodies[0] ?? '{}') as {
+      snippet?: unknown;
+      status: {
+        privacyStatus: string;
+        publishAt: string;
+        selfDeclaredMadeForKids: boolean;
+        containsSyntheticMedia: boolean;
+        embeddable: boolean;
+        license: string;
+        publicStatsViewable: boolean;
+      };
+    };
+    assert.equal(sent.snippet, undefined);
+    assert.equal(sent.status.privacyStatus, 'private');
+    assert.equal(sent.status.publishAt, '2026-10-30T10:15:00Z');
+    assert.equal(sent.status.selfDeclaredMadeForKids, false);
+    assert.equal(sent.status.containsSyntheticMedia, false);
+    assert.equal(sent.status.embeddable, true);
+    assert.equal(sent.status.license, 'youtube');
+    assert.equal(sent.status.publicStatsViewable, true);
+    assert.deepEqual(storage.scheduleSaves, [{ youtubeVideoId: YOUTUBE_ID, publishAt: '2026-10-30T10:15:00Z' }]);
+    assert.equal(storage.scheduleLock, 'absent');
+  });
+
+  await test('サムネイル失敗時は予約しない', async () => {
+    applyEnv(configuredEnv());
+    const storage = fakeStorage();
+    storage.thumbnailSet = 'absent';
+    storage.schedule = null;
+    const youtube = countingFetch(undefined, 403);
+    const response = await handleYoutubeUpload(uploadRequest({ videoId: VIDEO_ID }, `Bearer ${START_SECRET}`), {
+      storage,
+      fetchImpl: youtube.fetchImpl,
+      putImpl: successPut().put,
+      ensureThumbnail: async () => ({ ok: true, bytes: pngBytes(), limitExceeded: [] }),
+    });
+    const body = await response.json() as { scheduled: boolean; scheduleError: string; thumbnailSet: boolean; privacyStatus: string };
+    assert.equal(response.status, 200);
+    assert.equal(body.thumbnailSet, false);
+    assert.equal(body.scheduled, false);
+    assert.equal(body.scheduleError, 'thumbnail_not_set');
+    assert.equal(body.privacyStatus, 'private');
+    assert.equal(storage.marker, YOUTUBE_ID);
+    assert.equal(storage.schedule, null);
+    assert.equal(storage.scheduleSaves.length, 0);
+    assert.equal(youtube.counts.videos, 1);
+    assert.equal(youtube.counts.thumbs, 1);
+  });
+
+  await test('アップロード済みの動画は予約だけ再実行する', async () => {
+    applyEnv(configuredEnv());
+    const storage = fakeStorage();
+    storage.marker = YOUTUBE_ID;
+    storage.thumbnailSet = 'present';
+    storage.schedule = null;
+    const youtube = scheduleFetch({ list: () => listResponse({ privacyStatus: 'private' }) });
+    const response = await handleYoutubeUpload(uploadRequest({ videoId: VIDEO_ID }, `Bearer ${START_SECRET}`), {
+      storage,
+      fetchImpl: youtube.fetchImpl,
+      putImpl: async () => {
+        throw new Error('put should not run');
+      },
+      now: () => new Date('2026-10-30T09:00:00Z'),
+    });
+    const body = await response.json() as { scheduled: boolean; publishAt: string; alreadyUploaded: boolean; thumbnailSet: boolean };
+    assert.equal(response.status, 200);
+    assert.equal(body.alreadyUploaded, true);
+    assert.equal(body.thumbnailSet, true);
+    assert.equal(body.scheduled, true);
+    assert.equal(body.publishAt, '2026-10-30T10:15:00Z');
+    assert.deepEqual(youtube.calls, ['token', 'list', 'update']);
+    assert.equal(storage.markerSaves.length, 0);
+  });
+
+  await test('予約済み動画は再予約しない', async () => {
+    applyEnv(configuredEnv());
+    const storage = fakeStorage();
+    storage.marker = YOUTUBE_ID;
+    storage.thumbnailSet = 'present';
+    let called = false;
+    const response = await handleYoutubeUpload(uploadRequest({ videoId: VIDEO_ID }, `Bearer ${START_SECRET}`), {
+      storage,
+      fetchImpl: (async () => {
+        called = true;
+        throw new Error('fetch should not run');
+      }) as typeof fetch,
+    });
+    const body = await response.json() as { scheduled: boolean; publishAt: string };
+    assert.equal(response.status, 200);
+    assert.equal(body.scheduled, true);
+    assert.equal(body.publishAt, '2026-10-31T10:15:00Z');
+    assert.equal(called, false);
+    assert.equal(storage.scheduleSaves.length, 0);
+  });
+
+  await test('マーカーがなくてもYouTube側の予約を維持する', async () => {
+    applyEnv(configuredEnv());
+    const storage = fakeStorage();
+    storage.marker = YOUTUBE_ID;
+    storage.thumbnailSet = 'present';
+    storage.schedule = null;
+    const youtube = scheduleFetch({
+      list: () => listResponse({ privacyStatus: 'private', publishAt: '2026-10-31T19:15:00+09:00' }),
+      update: () => {
+        throw new Error('update should not run');
+      },
+    });
+    const response = await handleYoutubeUpload(uploadRequest({ videoId: VIDEO_ID }, `Bearer ${START_SECRET}`), {
+      storage,
+      fetchImpl: youtube.fetchImpl,
+    });
+    const body = await response.json() as { scheduled: boolean; publishAt: string; scheduleError?: string };
+    assert.equal(response.status, 200);
+    assert.equal(body.scheduled, true);
+    assert.equal(body.publishAt, '2026-10-31T10:15:00Z');
+    assert.equal(body.scheduleError, undefined);
+    assert.deepEqual(youtube.calls, ['token', 'list']);
+    assert.deepEqual(storage.scheduleSaves, [{ youtubeVideoId: YOUTUBE_ID, publishAt: '2026-10-31T10:15:00Z' }]);
+  });
+
+  await test('予約更新のタイムアウト後はYouTubeの状態を見て再実行する', async () => {
+    applyEnv(configuredEnv());
+    const storage = fakeStorage();
+    storage.marker = YOUTUBE_ID;
+    storage.thumbnailSet = 'present';
+    storage.schedule = null;
+    let lists = 0;
+    const youtube = scheduleFetch({
+      list: () => {
+        lists += 1;
+        if (lists === 1) return listResponse({ privacyStatus: 'private' });
+        return listResponse({ privacyStatus: 'private', publishAt: '2026-10-30T10:15:00Z' });
+      },
+      update: () => {
+        throw new Error('timeout');
+      },
+    });
+    const first = await handleYoutubeUpload(uploadRequest({ videoId: VIDEO_ID }, `Bearer ${START_SECRET}`), {
+      storage,
+      fetchImpl: youtube.fetchImpl,
+      now: () => new Date('2026-10-30T09:00:00Z'),
+    });
+    const firstBody = await first.json() as { scheduled: boolean; scheduleError: string; publishAt?: string };
+    assert.equal(first.status, 200);
+    assert.equal(firstBody.scheduled, false);
+    assert.equal(firstBody.scheduleError, 'schedule_incomplete');
+    assert.equal(firstBody.publishAt, undefined);
+    assert.equal(storage.schedule, null);
+    assert.equal(storage.scheduleLock, 'incomplete');
+    assert.equal(storage.marker, YOUTUBE_ID);
+    assert.equal(storage.thumbnailSet, 'present');
+    const second = await handleYoutubeUpload(uploadRequest({ videoId: VIDEO_ID }, `Bearer ${START_SECRET}`), {
+      storage,
+      fetchImpl: youtube.fetchImpl,
+      now: () => new Date('2026-10-30T11:00:00Z'),
+    });
+    const secondBody = await second.json() as { scheduled: boolean; publishAt: string };
+    assert.equal(second.status, 200);
+    assert.equal(secondBody.scheduled, true);
+    assert.equal(secondBody.publishAt, '2026-10-30T10:15:00Z');
+    assert.deepEqual(youtube.calls.filter((call) => call === 'update'), ['update']);
+    assert.equal(storage.scheduleLock, 'absent');
+    assert.deepEqual(storage.schedule, { youtubeVideoId: YOUTUBE_ID, publishAt: '2026-10-30T10:15:00Z' });
+  });
+
+  await test('予約のOAuthエラーでも動画とサムネイルを維持する', async () => {
+    applyEnv(configuredEnv());
+    const storage = fakeStorage();
+    storage.marker = YOUTUBE_ID;
+    storage.thumbnailSet = 'present';
+    storage.schedule = null;
+    const youtube = scheduleFetch({
+      tokenStatus: 400,
+      list: () => {
+        throw new Error('list should not run');
+      },
+    });
+    const leaks = await captureOutput(async () => {
+      const response = await handleYoutubeUpload(uploadRequest({ videoId: VIDEO_ID }, `Bearer ${START_SECRET}`), {
+        storage,
+        fetchImpl: youtube.fetchImpl,
+      });
+      const text = await response.text();
+      const body = JSON.parse(text) as { scheduled: boolean; scheduleError: string; youtubeVideoId: string; thumbnailSet: boolean };
+      assert.equal(response.status, 200);
+      assert.equal(body.scheduled, false);
+      assert.equal(body.scheduleError, 'invalid_grant');
+      assert.equal(body.youtubeVideoId, YOUTUBE_ID);
+      assert.equal(body.thumbnailSet, true);
+      assertNoSecrets(text);
+    });
+    assert.deepEqual(youtube.calls, ['token']);
+    assert.equal(storage.marker, YOUTUBE_ID);
+    assert.equal(storage.thumbnailSet, 'present');
+    assert.equal(storage.schedule, null);
+    assert.equal(storage.scheduleLock, 'absent');
+    assert.deepEqual(leaks, []);
+  });
+
+  await test('予約の同時実行は1回だけ更新する', async () => {
+    applyEnv(configuredEnv());
+    const storage = fakeStorage();
+    storage.marker = YOUTUBE_ID;
+    storage.thumbnailSet = 'present';
+    storage.schedule = null;
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let updates = 0;
+    const fetchImpl = scheduleFetch({
+      list: () => listResponse({ privacyStatus: 'private' }),
+      update: async (body, url) => {
+        updates += 1;
+        await gate;
+        return echoUpdate(body, url);
+      },
+    }).fetchImpl;
+    const firstPromise = handleYoutubeUpload(uploadRequest({ videoId: VIDEO_ID }, `Bearer ${START_SECRET}`), {
+      storage,
+      fetchImpl,
+      now: () => new Date('2026-10-30T09:00:00Z'),
+    });
+    for (let attempt = 0; attempt < 50 && updates !== 1; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(updates, 1);
+    assert.equal(storage.scheduleLock, 'setting');
+    const second = await handleYoutubeUpload(uploadRequest({ videoId: VIDEO_ID }, `Bearer ${START_SECRET}`), {
+      storage,
+      fetchImpl,
+      now: () => new Date('2026-10-30T11:00:00Z'),
+    });
+    const secondBody = await second.json() as { scheduled: boolean; scheduleError: string };
+    assert.equal(second.status, 200);
+    assert.equal(secondBody.scheduled, false);
+    assert.equal(secondBody.scheduleError, 'schedule_in_progress');
+    assert.equal(updates, 1);
+    release();
+    const first = await firstPromise;
+    const firstBody = await first.json() as { scheduled: boolean; publishAt: string };
+    assert.equal(firstBody.scheduled, true);
+    assert.equal(firstBody.publishAt, '2026-10-30T10:15:00Z');
+    assert.equal(updates, 1);
+    assert.equal(storage.scheduleLock, 'absent');
+  });
+
+  await test('マーカー保存失敗後も既存の予約日時を維持する', async () => {
+    applyEnv(configuredEnv());
+    const storage = fakeStorage();
+    storage.marker = YOUTUBE_ID;
+    storage.thumbnailSet = 'present';
+    storage.schedule = null;
+    storage.failScheduleSave = true;
+    let lists = 0;
+    const youtube = scheduleFetch({
+      list: () => {
+        lists += 1;
+        if (lists === 1) return listResponse({ privacyStatus: 'private' });
+        return listResponse({ privacyStatus: 'private', publishAt: '2026-10-30T10:15:00Z' });
+      },
+    });
+    const first = await handleYoutubeUpload(uploadRequest({ videoId: VIDEO_ID }, `Bearer ${START_SECRET}`), {
+      storage,
+      fetchImpl: youtube.fetchImpl,
+      now: () => new Date('2026-10-30T09:00:00Z'),
+    });
+    const firstBody = await first.json() as { scheduled: boolean; publishAt: string; scheduleError: string };
+    assert.equal(first.status, 200);
+    assert.equal(firstBody.scheduled, true);
+    assert.equal(firstBody.publishAt, '2026-10-30T10:15:00Z');
+    assert.equal(firstBody.scheduleError, 'schedule_marker_write_failed');
+    assert.equal(storage.schedule, null);
+    storage.failScheduleSave = false;
+    const second = await handleYoutubeUpload(uploadRequest({ videoId: VIDEO_ID }, `Bearer ${START_SECRET}`), {
+      storage,
+      fetchImpl: youtube.fetchImpl,
+      now: () => new Date('2026-10-30T11:00:00Z'),
+    });
+    const secondBody = await second.json() as { scheduled: boolean; publishAt: string; scheduleError?: string };
+    assert.equal(secondBody.scheduled, true);
+    assert.equal(secondBody.publishAt, '2026-10-30T10:15:00Z');
+    assert.equal(secondBody.scheduleError, undefined);
+    assert.deepEqual(youtube.calls.filter((call) => call === 'update'), ['update']);
+    assert.deepEqual(storage.schedule, { youtubeVideoId: YOUTUBE_ID, publishAt: '2026-10-30T10:15:00Z' });
+  });
+
+  await test('不正な予約マーカーや公開済み動画は更新しない', async () => {
+    applyEnv(configuredEnv());
+    const mismatched = fakeStorage();
+    mismatched.marker = YOUTUBE_ID;
+    mismatched.thumbnailSet = 'present';
+    mismatched.schedule = { youtubeVideoId: 'zzzzzzzzzzz', publishAt: '2026-11-01T10:15:00Z' };
+    const mismatchResponse = await handleYoutubeUpload(uploadRequest({ videoId: VIDEO_ID }, `Bearer ${START_SECRET}`), {
+      storage: mismatched,
+      fetchImpl: (async () => {
+        throw new Error('fetch should not run');
+      }) as typeof fetch,
+    });
+    const mismatchBody = await mismatchResponse.json() as { scheduled: boolean; scheduleError: string };
+    assert.equal(mismatchResponse.status, 200);
+    assert.equal(mismatchBody.scheduled, false);
+    assert.equal(mismatchBody.scheduleError, 'schedule_marker_invalid');
+    assert.equal(mismatched.scheduleSaves.length, 0);
+
+    const published = fakeStorage();
+    published.marker = YOUTUBE_ID;
+    published.thumbnailSet = 'present';
+    published.schedule = null;
+    const youtube = scheduleFetch({
+      list: () => listResponse({ privacyStatus: 'public' }),
+      update: () => {
+        throw new Error('update should not run');
+      },
+    });
+    const publishedResponse = await handleYoutubeUpload(uploadRequest({ videoId: VIDEO_ID }, `Bearer ${START_SECRET}`), {
+      storage: published,
+      fetchImpl: youtube.fetchImpl,
+    });
+    const publishedBody = await publishedResponse.json() as { scheduled: boolean; scheduleError: string };
+    assert.equal(publishedBody.scheduled, false);
+    assert.equal(publishedBody.scheduleError, 'already_published');
+    assert.deepEqual(youtube.calls, ['token', 'list']);
+    assert.equal(published.marker, YOUTUBE_ID);
+    assert.equal(published.thumbnailSet, 'present');
+    assert.equal(published.schedule, null);
+  });
+
+  await test('日本時間の公開日時をUTCで計算する', async () => {
+    assert.equal(nextYoutubePublishAt(new Date('2026-10-30T09:00:00.000Z')), '2026-10-30T10:15:00Z');
+    assert.equal(nextYoutubePublishAt(new Date('2026-10-30T10:14:00.000Z')), '2026-10-30T10:15:00Z');
+    assert.equal(nextYoutubePublishAt(new Date('2026-10-30T10:14:30.000Z')), '2026-10-31T10:15:00Z');
+    assert.equal(nextYoutubePublishAt(new Date('2026-10-30T10:15:00.000Z')), '2026-10-31T10:15:00Z');
+    assert.equal(nextYoutubePublishAt(new Date('2026-10-30T11:00:00.000Z')), '2026-10-31T10:15:00Z');
+    assert.equal(nextYoutubePublishAt(new Date('2026-10-30T14:30:00.000Z')), '2026-10-31T10:15:00Z');
+    assert.equal(nextYoutubePublishAt(new Date('2026-10-31T15:10:00.000Z')), '2026-11-01T10:15:00Z');
+    assert.equal(nextYoutubePublishAt(new Date('2026-12-31T15:00:00.000Z')), '2027-01-01T10:15:00Z');
+  });
+
+  await test('公開60秒未満なら翌日19:15を送る', async () => {
+    applyEnv(configuredEnv());
+    const storage = fakeStorage();
+    storage.marker = YOUTUBE_ID;
+    storage.thumbnailSet = 'present';
+    storage.schedule = null;
+    const youtube = scheduleFetch({ list: () => listResponse({ privacyStatus: 'private' }) });
+    const response = await handleYoutubeUpload(uploadRequest({ videoId: VIDEO_ID }, `Bearer ${START_SECRET}`), {
+      storage,
+      fetchImpl: youtube.fetchImpl,
+      now: () => new Date('2026-10-30T10:14:30.000Z'),
+    });
+    const body = await response.json() as { scheduled: boolean; publishAt: string };
+    const sent = JSON.parse(youtube.updateBodies[0] ?? '{}') as { status: { publishAt: string } };
+    assert.equal(body.scheduled, true);
+    assert.equal(body.publishAt, '2026-10-31T10:15:00Z');
+    assert.equal(sent.status.publishAt, '2026-10-31T10:15:00Z');
+  });
+
+  await test('YouTube側のstatusを維持して予約する', async () => {
+    applyEnv(configuredEnv());
+    const storage = fakeStorage();
+    storage.marker = YOUTUBE_ID;
+    storage.thumbnailSet = 'present';
+    storage.schedule = null;
+    const youtube = scheduleFetch({
+      list: () => listResponse({
+        privacyStatus: 'private',
+        embeddable: false,
+        license: 'creativeCommon',
+        publicStatsViewable: false,
+        selfDeclaredMadeForKids: true,
+        containsSyntheticMedia: true,
+      }),
+    });
+    const response = await handleYoutubeUpload(uploadRequest({ videoId: VIDEO_ID }, `Bearer ${START_SECRET}`), {
+      storage,
+      fetchImpl: youtube.fetchImpl,
+      now: () => new Date('2026-10-30T09:00:00Z'),
+    });
+    const sent = JSON.parse(youtube.updateBodies[0] ?? '{}') as { snippet?: unknown; status: Record<string, unknown> };
+    assert.equal(response.status, 200);
+    assert.equal(sent.snippet, undefined);
+    assert.equal(sent.status.privacyStatus, 'private');
+    assert.equal(sent.status.publishAt, '2026-10-30T10:15:00Z');
+    assert.equal(sent.status.embeddable, false);
+    assert.equal(sent.status.license, 'creativeCommon');
+    assert.equal(sent.status.publicStatsViewable, false);
+    assert.equal(sent.status.selfDeclaredMadeForKids, true);
+    assert.equal(sent.status.containsSyntheticMedia, true);
   });
 
   await test('ログは段階とステータスだけを出す', async () => {

@@ -56,6 +56,21 @@ const SAFE_REASONS = new Set([
   'thumbnail_lock_failed',
   'thumbnail_in_progress',
   'thumbnail_incomplete',
+  'thumbnail_not_set',
+  'schedule_read_failed',
+  'schedule_marker_invalid',
+  'schedule_lock_failed',
+  'schedule_in_progress',
+  'schedule_incomplete',
+  'schedule_failed',
+  'schedule_status_unknown',
+  'schedule_unconfirmed',
+  'schedule_marker_write_failed',
+  'video_not_found',
+  'already_published',
+  'not_schedulable',
+  'invalidPublishAt',
+  'videoNotFound',
   'quotaExceeded',
   'uploadLimitExceeded',
   'forbidden',
@@ -80,6 +95,12 @@ export type UploadStorage = {
   markThumbnailLockIncomplete(videoId: string): Promise<void>;
   deleteThumbnailLock(videoId: string): Promise<void>;
   saveThumbnailSet(videoId: string): Promise<void>;
+  readSchedule(videoId: string): Promise<'absent' | 'invalid' | 'unknown' | { youtubeVideoId: string; publishAt: string }>;
+  createScheduleLock(videoId: string): Promise<'created' | 'exists' | 'failed'>;
+  readScheduleLock(videoId: string): Promise<'setting' | 'incomplete' | 'absent' | 'unknown'>;
+  markScheduleLockIncomplete(videoId: string): Promise<void>;
+  deleteScheduleLock(videoId: string): Promise<void>;
+  saveSchedule(videoId: string, youtubeVideoId: string, publishAt: string): Promise<void>;
 };
 
 type UploadMetadata = {
@@ -115,12 +136,25 @@ export type UploadDeps = {
   putImpl?: (request: PutRequest) => Promise<PutResponse>;
   ensureThumbnail?: (videoId: string) => Promise<ThumbnailPngResult>;
   setThumbnail?: (accessToken: string, youtubeVideoId: string, png: Uint8Array) => Promise<ThumbnailSetResult>;
+  now?: () => Date;
 };
 
 type UploadedVideo = {
   youtubeVideoId: string;
   isPrivate: boolean;
 };
+
+const PUBLISH_AT_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
+const TOKYO_OFFSET_MS = 9 * 60 * 60 * 1000;
+const PUBLISH_SAFETY_MS = 60 * 1000;
+
+export function nextYoutubePublishAt(now: Date): string {
+  const tokyo = new Date(now.getTime() + TOKYO_OFFSET_MS);
+  let publishAt = Date.UTC(tokyo.getUTCFullYear(), tokyo.getUTCMonth(), tokyo.getUTCDate(), 19, 15, 0, 0) - TOKYO_OFFSET_MS;
+  if (now.getTime() >= publishAt) publishAt += 24 * 60 * 60 * 1000;
+  if (publishAt - now.getTime() < PUBLISH_SAFETY_MS) publishAt += 24 * 60 * 60 * 1000;
+  return formatUtcSeconds(publishAt);
+}
 
 export function validateVideoId(value: unknown): string | null {
   if (typeof value !== 'string') return null;
@@ -405,15 +439,7 @@ export async function handleYoutubeUpload(request: Request, deps: UploadDeps = {
   if (marker === 'invalid') return json({ error: 'marker_invalid' }, 409);
   if (marker !== 'absent') {
     const thumbnail = await attachThumbnail(storage, fetchImpl, videoId, marker.youtubeVideoId, deps);
-    return json(
-      {
-        youtubeVideoId: marker.youtubeVideoId,
-        privacyStatus: 'private',
-        alreadyUploaded: true,
-        ...thumbnail,
-      },
-      200,
-    );
+    return respondUploaded(storage, fetchImpl, videoId, marker.youtubeVideoId, true, thumbnail, deps);
   }
 
   let metadata: UploadMetadata;
@@ -505,12 +531,42 @@ export async function handleYoutubeUpload(request: Request, deps: UploadDeps = {
 
   if (!uploadedVideo) return json({ error: 'upload_failed' }, 502);
   const thumbnail = await attachThumbnail(storage, fetchImpl, videoId, uploadedVideo.youtubeVideoId, deps);
+  return respondUploaded(storage, fetchImpl, videoId, uploadedVideo.youtubeVideoId, false, thumbnail, deps);
+}
+
+type ScheduleResult =
+  | { scheduled: true; publishAt: string; scheduleError?: string }
+  | { scheduled: false; scheduleError: string };
+
+type ListedVideoStatus = {
+  privacyStatus: string;
+  publishAt: string | null;
+  embeddable: boolean | null;
+  license: string | null;
+  publicStatsViewable: boolean | null;
+  selfDeclaredMadeForKids: boolean | null;
+  containsSyntheticMedia: boolean | null;
+};
+
+async function respondUploaded(
+  storage: UploadStorage,
+  fetchImpl: typeof fetch,
+  videoId: string,
+  youtubeVideoId: string,
+  alreadyUploaded: boolean,
+  thumbnail: { thumbnailSet: true } | { thumbnailSet: false; thumbnailError: string },
+  deps: UploadDeps,
+): Promise<Response> {
+  const schedule = thumbnail.thumbnailSet
+    ? await attachSchedule(storage, fetchImpl, videoId, youtubeVideoId, deps)
+    : { scheduled: false as const, scheduleError: 'thumbnail_not_set' };
   return json(
     {
-      youtubeVideoId: uploadedVideo.youtubeVideoId,
+      youtubeVideoId,
       privacyStatus: 'private',
-      alreadyUploaded: false,
+      alreadyUploaded,
       ...thumbnail,
+      ...schedule,
     },
     200,
   );
@@ -596,6 +652,207 @@ async function acquireThumbnailLock(storage: UploadStorage, videoId: string): Pr
   if (state !== 'incomplete') return 'exists';
   await storage.deleteThumbnailLock(videoId);
   return storage.createThumbnailLock(videoId);
+}
+
+async function attachSchedule(
+  storage: UploadStorage,
+  fetchImpl: typeof fetch,
+  videoId: string,
+  youtubeVideoId: string,
+  deps: UploadDeps,
+): Promise<ScheduleResult> {
+  try {
+    const marked = await storage.readSchedule(videoId);
+    const recorded = scheduleFromMarker(marked, youtubeVideoId);
+    if (recorded) return recorded;
+    if (marked === 'unknown') return scheduleFailure('schedule_read_failed');
+
+    const lock = await acquireScheduleLock(storage, videoId);
+    if (lock === 'exists') return scheduleFailure('schedule_in_progress');
+    if (lock !== 'created') return scheduleFailure('schedule_lock_failed');
+
+    let outcomeUnknown = false;
+    try {
+      const again = await storage.readSchedule(videoId);
+      const held = scheduleFromMarker(again, youtubeVideoId);
+      if (held) {
+        await storage.deleteScheduleLock(videoId);
+        return held;
+      }
+      if (again === 'unknown') {
+        await storage.deleteScheduleLock(videoId);
+        return scheduleFailure('schedule_read_failed');
+      }
+
+      const refreshed = await refreshAccessToken(fetchImpl);
+      if (!refreshed.ok) {
+        await storage.deleteScheduleLock(videoId);
+        return scheduleFailure(safeReason(refreshed.reason));
+      }
+
+      const listed = await listVideoStatus(fetchImpl, refreshed.accessToken, youtubeVideoId);
+      if (!listed.ok) {
+        await storage.deleteScheduleLock(videoId);
+        return scheduleFailure(listed.error);
+      }
+      if (listed.status.privacyStatus === 'public') {
+        await storage.deleteScheduleLock(videoId);
+        return scheduleFailure('already_published');
+      }
+      if (listed.status.privacyStatus !== 'private') {
+        await storage.deleteScheduleLock(videoId);
+        return scheduleFailure('not_schedulable');
+      }
+      if (listed.status.publishAt) {
+        const saved = await rememberSchedule(storage, videoId, youtubeVideoId, listed.status.publishAt);
+        await storage.deleteScheduleLock(videoId).catch(() => undefined);
+        return saved;
+      }
+
+      const publishAt = nextYoutubePublishAt((deps.now ?? (() => new Date()))());
+      outcomeUnknown = true;
+      const updated = await updateVideoSchedule(
+        fetchImpl,
+        refreshed.accessToken,
+        youtubeVideoId,
+        publishAt,
+        listed.status,
+      );
+      outcomeUnknown = false;
+      if (!updated.ok) {
+        if (updated.unknown) {
+          await storage.markScheduleLockIncomplete(videoId).catch(() => undefined);
+          return scheduleFailure('schedule_incomplete');
+        }
+        logStage('schedule_set', updated.status ?? null, publicScheduleError(updated.error));
+        await storage.deleteScheduleLock(videoId);
+        return scheduleFailure(updated.error);
+      }
+
+      const saved = await rememberSchedule(storage, videoId, youtubeVideoId, updated.publishAt);
+      await storage.deleteScheduleLock(videoId).catch(() => undefined);
+      return saved;
+    } catch {
+      if (outcomeUnknown) {
+        await storage.markScheduleLockIncomplete(videoId).catch(() => undefined);
+        return scheduleFailure('schedule_incomplete');
+      }
+      await storage.deleteScheduleLock(videoId).catch(() => undefined);
+      return scheduleFailure('schedule_failed');
+    }
+  } catch {
+    return scheduleFailure('schedule_failed');
+  }
+}
+
+function scheduleFromMarker(
+  marked: 'absent' | 'invalid' | 'unknown' | { youtubeVideoId: string; publishAt: string },
+  youtubeVideoId: string,
+): ScheduleResult | null {
+  if (marked === 'absent' || marked === 'unknown') return null;
+  if (marked === 'invalid' || marked.youtubeVideoId !== youtubeVideoId) return scheduleFailure('schedule_marker_invalid');
+  return { scheduled: true, publishAt: marked.publishAt };
+}
+
+async function rememberSchedule(
+  storage: UploadStorage,
+  videoId: string,
+  youtubeVideoId: string,
+  publishAt: string,
+): Promise<ScheduleResult> {
+  try {
+    await storage.saveSchedule(videoId, youtubeVideoId, publishAt);
+    return { scheduled: true, publishAt };
+  } catch {
+    return { scheduled: true, publishAt, scheduleError: 'schedule_marker_write_failed' };
+  }
+}
+
+async function acquireScheduleLock(storage: UploadStorage, videoId: string): Promise<'created' | 'exists' | 'failed'> {
+  const created = await storage.createScheduleLock(videoId);
+  if (created !== 'exists') return created;
+  const state = await storage.readScheduleLock(videoId);
+  if (state !== 'incomplete') return 'exists';
+  await storage.deleteScheduleLock(videoId);
+  return storage.createScheduleLock(videoId);
+}
+
+async function listVideoStatus(
+  fetchImpl: typeof fetch,
+  accessToken: string,
+  youtubeVideoId: string,
+): Promise<{ ok: true; status: ListedVideoStatus } | { ok: false; error: string }> {
+  const url = new URL('https://www.googleapis.com/youtube/v3/videos');
+  url.searchParams.set('part', 'status');
+  url.searchParams.set('id', youtubeVideoId);
+  let response: Response;
+  try {
+    response = await fetchImpl(url, {
+      method: 'GET',
+      redirect: 'manual',
+      cache: 'no-store',
+      signal: AbortSignal.timeout(30_000),
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+  } catch {
+    return { ok: false, error: 'schedule_status_unknown' };
+  }
+  const bodyText = await readLimitedText(response);
+  if (response.status !== 200) return { ok: false, error: youtubeReason(bodyText) };
+  const status = readListedStatus(bodyText, youtubeVideoId);
+  if (!status) return { ok: false, error: 'video_not_found' };
+  return { ok: true, status };
+}
+
+async function updateVideoSchedule(
+  fetchImpl: typeof fetch,
+  accessToken: string,
+  youtubeVideoId: string,
+  publishAt: string,
+  current: ListedVideoStatus,
+): Promise<{ ok: true; publishAt: string } | { ok: false; error: string; unknown?: boolean; status?: number | null }> {
+  const url = new URL('https://www.googleapis.com/youtube/v3/videos');
+  url.searchParams.set('part', 'status');
+  let response: Response;
+  try {
+    response = await fetchImpl(url, {
+      method: 'PUT',
+      redirect: 'manual',
+      cache: 'no-store',
+      signal: AbortSignal.timeout(30_000),
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json; charset=UTF-8',
+      },
+      body: JSON.stringify({
+        id: youtubeVideoId,
+        status: {
+          privacyStatus: 'private',
+          publishAt,
+          selfDeclaredMadeForKids: current.selfDeclaredMadeForKids ?? false,
+          containsSyntheticMedia: current.containsSyntheticMedia ?? false,
+          embeddable: current.embeddable ?? true,
+          license: current.license ?? 'youtube',
+          publicStatsViewable: current.publicStatsViewable ?? true,
+        },
+      }),
+    });
+  } catch {
+    return { ok: false, error: 'schedule_incomplete', unknown: true };
+  }
+  const bodyText = await readLimitedText(response);
+  if (response.status !== 200) return { ok: false, error: youtubeReason(bodyText), status: response.status };
+  const confirmed = confirmedPublishAt(bodyText, youtubeVideoId, publishAt);
+  if (!confirmed) return { ok: false, error: 'schedule_unconfirmed', status: response.status };
+  return { ok: true, publishAt: confirmed };
+}
+
+function scheduleFailure(error: string): ScheduleResult {
+  return { scheduled: false, scheduleError: publicScheduleError(error) };
+}
+
+function publicScheduleError(code: string): string {
+  return SAFE_REASONS.has(code) ? code : 'schedule_failed';
 }
 
 async function defaultEnsureThumbnail(videoId: string): Promise<ThumbnailPngResult> {
@@ -794,13 +1051,75 @@ export function createSupabaseUploadStorage(
       });
       if (error) throw new UploadStageError('thumbnail_failed', storageStatus(error) || null, storageErrorCode(error));
     },
+    async readSchedule(videoId) {
+      const downloaded = await getSupabaseAdmin().storage.from(BUCKET).download(schedulePath(videoId));
+      if (downloaded.error) {
+        if (await isNotFound(downloaded.error)) return 'absent';
+        logStage('schedule_read', storageStatus(downloaded.error) || null, storageErrorCode(downloaded.error));
+        return 'unknown';
+      }
+      if (!downloaded.data) return 'unknown';
+      return parseScheduleMarker(await downloaded.data.text());
+    },
+    async createScheduleLock(videoId) {
+      const { error } = await getSupabaseAdmin().storage.from(BUCKET).upload(scheduleLockPath(videoId), 'setting', {
+        upsert: false,
+        contentType: 'text/plain',
+        cacheControl: '0',
+      });
+      if (!error) return 'created';
+      if (isAlreadyExists(error)) return 'exists';
+      logStage('schedule_lock', storageStatus(error) || null, storageErrorCode(error));
+      return 'failed';
+    },
+    async readScheduleLock(videoId) {
+      const found = await findNamedObject(videoId, 'youtube-schedule-lock.txt', 'schedule_read');
+      if (found !== 'present') return found;
+      const downloaded = await getSupabaseAdmin().storage.from(BUCKET).download(scheduleLockPath(videoId));
+      if (downloaded.error || !downloaded.data) return 'unknown';
+      const text = (await downloaded.data.text()).trim();
+      if (text === 'setting' || text === 'incomplete') return text;
+      return 'unknown';
+    },
+    async markScheduleLockIncomplete(videoId) {
+      const { error } = await getSupabaseAdmin().storage.from(BUCKET).upload(scheduleLockPath(videoId), 'incomplete', {
+        upsert: true,
+        contentType: 'text/plain',
+        cacheControl: '0',
+      });
+      if (error) logStage('schedule_lock', storageStatus(error) || null, storageErrorCode(error));
+    },
+    async deleteScheduleLock(videoId) {
+      await getSupabaseAdmin().storage.from(BUCKET).remove([scheduleLockPath(videoId)]);
+    },
+    async saveSchedule(videoId, youtubeVideoId, publishAt) {
+      const body = `${youtubeVideoId}\n${publishAt}\n`;
+      const { error } = await getSupabaseAdmin().storage.from(BUCKET).upload(schedulePath(videoId), body, {
+        upsert: false,
+        contentType: 'text/plain',
+        cacheControl: '0',
+      });
+      if (!error) return;
+      if (!isAlreadyExists(error)) {
+        throw new UploadStageError('schedule_marker_write_failed', storageStatus(error) || null, storageErrorCode(error));
+      }
+      const existing = await this.readSchedule(videoId);
+      if (existing !== 'absent' && existing !== 'invalid' && existing !== 'unknown' && existing.youtubeVideoId === youtubeVideoId && existing.publishAt === publishAt) {
+        return;
+      }
+      throw new UploadStageError('schedule_marker_write_failed', storageStatus(error) || null, storageErrorCode(error));
+    },
   };
 }
 
-async function findNamedObject(videoId: string, name: string): Promise<'present' | 'absent' | 'unknown'> {
+async function findNamedObject(
+  videoId: string,
+  name: string,
+  stage = 'thumbnail_read',
+): Promise<'present' | 'absent' | 'unknown'> {
   const { data, error } = await getSupabaseAdmin().storage.from(BUCKET).list(videoId, { limit: 100, search: name });
   if (error) {
-    logStage('thumbnail_read', storageStatus(error) || null, storageErrorCode(error));
+    logStage(stage, storageStatus(error) || null, storageErrorCode(error));
     return 'unknown';
   }
   return (data ?? []).some((item) => item.name === name) ? 'present' : 'absent';
@@ -1112,6 +1431,79 @@ function thumbnailLockPath(videoId: string): string {
 
 function thumbnailSetPath(videoId: string): string {
   return `${videoId}/youtube-thumbnail-set.txt`;
+}
+
+function schedulePath(videoId: string): string {
+  return `${videoId}/youtube-scheduled.txt`;
+}
+
+function scheduleLockPath(videoId: string): string {
+  return `${videoId}/youtube-schedule-lock.txt`;
+}
+
+function formatUtcSeconds(ms: number): string {
+  return new Date(ms).toISOString().replace('.000Z', 'Z');
+}
+
+function canonicalPublishAt(value: unknown): string | null {
+  if (typeof value !== 'string' || value.length > 40 || !value.includes('T')) return null;
+  const ms = Date.parse(value);
+  if (!Number.isFinite(ms)) return null;
+  const formatted = formatUtcSeconds(ms);
+  return PUBLISH_AT_PATTERN.test(formatted) ? formatted : null;
+}
+
+function parseScheduleMarker(text: string): 'invalid' | { youtubeVideoId: string; publishAt: string } {
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0);
+  if (lines.length !== 2 || !YOUTUBE_ID_PATTERN.test(lines[0])) return 'invalid';
+  const publishAt = canonicalPublishAt(lines[1]);
+  if (!publishAt || publishAt !== lines[1]) return 'invalid';
+  return { youtubeVideoId: lines[0], publishAt };
+}
+
+function readListedStatus(bodyText: string, youtubeVideoId: string): ListedVideoStatus | null {
+  try {
+    const payload = JSON.parse(bodyText) as { items?: unknown };
+    if (!Array.isArray(payload.items)) return null;
+    const item = payload.items.find((entry) => {
+      if (!entry || typeof entry !== 'object') return false;
+      return (entry as { id?: unknown }).id === youtubeVideoId;
+    }) as { status?: unknown } | undefined;
+    if (!item || !item.status || typeof item.status !== 'object') return null;
+    const status = item.status as {
+      privacyStatus?: unknown;
+      publishAt?: unknown;
+      embeddable?: unknown;
+      license?: unknown;
+      publicStatsViewable?: unknown;
+      selfDeclaredMadeForKids?: unknown;
+      containsSyntheticMedia?: unknown;
+    };
+    if (typeof status.privacyStatus !== 'string') return null;
+    return {
+      privacyStatus: status.privacyStatus,
+      publishAt: canonicalPublishAt(status.publishAt),
+      embeddable: typeof status.embeddable === 'boolean' ? status.embeddable : null,
+      license: status.license === 'youtube' || status.license === 'creativeCommon' ? status.license : null,
+      publicStatsViewable: typeof status.publicStatsViewable === 'boolean' ? status.publicStatsViewable : null,
+      selfDeclaredMadeForKids: typeof status.selfDeclaredMadeForKids === 'boolean' ? status.selfDeclaredMadeForKids : null,
+      containsSyntheticMedia: typeof status.containsSyntheticMedia === 'boolean' ? status.containsSyntheticMedia : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function confirmedPublishAt(bodyText: string, youtubeVideoId: string, expected: string): string | null {
+  try {
+    const payload = JSON.parse(bodyText) as { id?: unknown; status?: { privacyStatus?: unknown; publishAt?: unknown } };
+    if (payload.id !== youtubeVideoId || payload.status?.privacyStatus !== 'private') return null;
+    const publishAt = canonicalPublishAt(payload.status.publishAt);
+    if (!publishAt || Date.parse(publishAt) !== Date.parse(expected)) return null;
+    return publishAt;
+  } catch {
+    return null;
+  }
 }
 
 class UploadStageError extends Error {
