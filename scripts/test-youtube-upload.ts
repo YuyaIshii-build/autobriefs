@@ -4,12 +4,15 @@ import { readFileSync } from 'node:fs';
 import { POST as uploadRoute } from '../src/app/api/youtube/upload/route';
 import { ensureYoutubeThumbnailPng } from '../src/lib/youtube/thumbnail';
 import {
+  buildVideoTagsFromDocument,
   chooseTitlesFile,
   createSupabaseUploadStorage,
+  FIXED_VIDEO_TAGS,
   handleYoutubeUpload,
   parseTitlesDocument,
   readByteSize,
   validateVideoId,
+  youtubeTagListLength,
   type PutRequest,
   type PutResponse,
   type UploadStorage,
@@ -190,14 +193,14 @@ function uploadRequest(body: unknown, authorization?: string): Request {
   });
 }
 
-function tokenFetch(onSession?: (body: string) => void): typeof fetch {
+function tokenFetch(onSession?: (body: string, url: string) => void): typeof fetch {
   return (async (url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
     const target = String(url);
     if (target.includes('oauth2.googleapis.com/token')) {
       return new Response(JSON.stringify({ access_token: ACCESS_TOKEN, expires_in: 3599 }), { status: 200 });
     }
     if (target.includes('/upload/youtube/v3/videos')) {
-      onSession?.(String(init?.body ?? ''));
+      onSession?.(String(init?.body ?? ''), target);
       return new Response(null, { status: 200, headers: { Location: SESSION_URL } });
     }
     throw new Error(`unexpected fetch ${target}`);
@@ -413,13 +416,14 @@ async function main() {
     const storage = fakeStorage();
     const sink = successPut();
     let sessionBody = '';
+    let sessionUrl = '';
     const leaks = await captureOutput(async () => {
       const response = await handleYoutubeUpload(
         uploadRequest(
           { videoId: VIDEO_ID, privacyStatus: 'public', videoUrl: 'https://evil.example/a.mp4' },
           `Bearer ${START_SECRET}`,
         ),
-        { storage, fetchImpl: tokenFetch((body) => { sessionBody = body; }), putImpl: sink.put },
+        { storage, fetchImpl: tokenFetch((body, url) => { sessionBody = body; sessionUrl = url; }), putImpl: sink.put },
       );
       const text = await response.text();
       const body = JSON.parse(text) as { youtubeVideoId: string; privacyStatus: string; alreadyUploaded: boolean };
@@ -436,13 +440,33 @@ async function main() {
       assert.equal(sink.calls[0]?.headers['Content-Length'], '8');
     });
     const sent = JSON.parse(sessionBody) as {
-      status: { privacyStatus: string };
-      snippet: { title: string; description: string };
+      status: {
+        privacyStatus: string;
+        selfDeclaredMadeForKids: boolean;
+        containsSyntheticMedia: boolean;
+        embeddable: boolean;
+        license: string;
+        publicStatsViewable: boolean;
+        publishAt?: string;
+      };
+      snippet: { title: string; description: string; categoryId: string; defaultLanguage: string; tags: string[] };
     };
     assert.equal(sent.status.privacyStatus, 'private');
+    assert.equal(sent.status.selfDeclaredMadeForKids, false);
+    assert.equal(sent.status.containsSyntheticMedia, false);
+    assert.equal(sent.status.embeddable, true);
+    assert.equal(sent.status.license, 'youtube');
+    assert.equal(sent.status.publicStatsViewable, true);
+    assert.equal(sent.status.publishAt, undefined);
     assert.equal(sent.snippet.title, SAMPLE_TITLE);
     assert.equal(sent.snippet.description, SAMPLE_DESCRIPTION);
-    assert.equal(sessionBody.includes('public'), false);
+    assert.equal(sent.snippet.categoryId, '25');
+    assert.equal(sent.snippet.defaultLanguage, 'ja');
+    assert.deepEqual(sent.snippet.tags, [...FIXED_VIDEO_TAGS]);
+    assert.match(sessionUrl, /notifySubscribers=true/);
+    assert.match(sessionUrl, /part=snippet%2Cstatus/);
+    assert.equal(sessionBody.includes('"public"'), false);
+    assert.equal(sessionBody.includes('publishAt'), false);
     assert.equal(sessionBody.includes('evil.example'), false);
     assert.deepEqual(leaks, []);
   });
@@ -938,13 +962,14 @@ ${'あ'.repeat(5001)}
       { storage, fetchImpl: tokenFetch((body) => { sessionBody = body; }), putImpl: successPut().put },
     );
     const body = await response.json() as { privacyStatus: string; alreadyUploaded: boolean };
-    const sent = JSON.parse(sessionBody) as { status: { privacyStatus: string }; snippet: { title: string; description: string } };
+    const sent = JSON.parse(sessionBody) as { status: { privacyStatus: string }; snippet: { title: string; description: string; tags: string[] } };
     assert.equal(response.status, 200);
     assert.equal(body.privacyStatus, 'private');
     assert.equal(body.alreadyUploaded, false);
     assert.equal(sent.snippet.title, '明示タイトル');
     assert.equal(sent.snippet.description, '明示した説明');
     assert.equal(sent.status.privacyStatus, 'private');
+    assert.deepEqual(sent.snippet.tags, [...FIXED_VIDEO_TAGS]);
     assert.equal(storage.titlesReads, 0);
   });
 
@@ -1194,6 +1219,73 @@ ${'あ'.repeat(5001)}
     assert.equal(thumbs, 2);
     assert.equal(failed.thumbnailLock, 'absent');
     assert.equal(failed.markerSaves.length, 0);
+  });
+
+  await test('固定タグと動画固有タグを重複なく作る', async () => {
+    const tags = buildVideoTagsFromDocument(`=== TITLES ===
+タイトルA
+本文
+
+=== DESCRIPTIONS ===
+概要
+
+=== THUMBNAIL ===
+COMPANY: JT
+SUBTITLE: 上方修正
+HEADLINE: 最高益更新
+CATEGORY: business
+TICKER: 2914
+銘柄コード: 9999
+業界: たばこ
+INDUSTRY: 
+COMPANY: 日本株
+`);
+    assert.deepEqual(tags, ['JT', '2914', 'たばこ', ...FIXED_VIDEO_TAGS]);
+
+    const spaced = buildVideoTagsFromDocument(`=== THUMBNAIL ===
+COMPANY: Foo Bar
+TICKER:   
+業界名: 半導体製造装置
+`);
+    assert.deepEqual(spaced, ['Foo Bar', '半導体製造装置', ...FIXED_VIDEO_TAGS]);
+    assert.equal(youtubeTagListLength(['Foo Bar']), 9);
+
+    const oversized = 'あ'.repeat(490);
+    const fitted = buildVideoTagsFromDocument(`=== THUMBNAIL ===
+COMPANY: ${oversized}
+`);
+    assert.equal(fitted[0], oversized);
+    assert.equal(fitted.includes('日本株'), true);
+    assert.equal(fitted.includes('株式投資'), true);
+    assert.equal(fitted.includes('投資ニュース'), false);
+    assert.ok(youtubeTagListLength(fitted) <= 500);
+
+    const plain = buildVideoTagsFromDocument(SAMPLE_TITLES);
+    assert.deepEqual(plain, [...FIXED_VIDEO_TAGS]);
+
+    applyEnv(configuredEnv());
+    const storage = fakeStorage();
+    storage.titles = `${SAMPLE_TITLES}
+=== THUMBNAIL ===
+COMPANY: JT
+SUBTITLE: 上方修正
+HEADLINE: 最高益更新
+CATEGORY: business
+銘柄コード: 2914
+業界名: たばこ
+`;
+    let sessionBody = '';
+    const response = await handleYoutubeUpload(uploadRequest({ videoId: VIDEO_ID }, `Bearer ${START_SECRET}`), {
+      storage,
+      fetchImpl: tokenFetch((body) => { sessionBody = body; }),
+      putImpl: successPut().put,
+    });
+    const sent = JSON.parse(sessionBody) as { snippet: { title: string; description: string; tags: string[] }; status: { privacyStatus: string } };
+    assert.equal(response.status, 200);
+    assert.equal(sent.snippet.title, SAMPLE_TITLE);
+    assert.equal(sent.snippet.description, SAMPLE_DESCRIPTION);
+    assert.equal(sent.status.privacyStatus, 'private');
+    assert.deepEqual(sent.snippet.tags, ['JT', '2914', 'たばこ', ...FIXED_VIDEO_TAGS]);
   });
 
   await test('ログは段階とステータスだけを出す', async () => {

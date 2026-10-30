@@ -12,7 +12,7 @@ const MAX_RESPONSE_BYTES = 200_000;
 const MAX_REQUEST_BYTES = 16_384;
 const MAX_TITLE_LENGTH = 100;
 const MAX_DESCRIPTION_LENGTH = 5_000;
-const SESSION_URL = 'https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet%2Cstatus';
+const SESSION_URL = 'https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet%2Cstatus&notifySubscribers=true';
 
 const REQUIRED_ENV = [
   'YOUTUBE_OAUTH_CLIENT_ID',
@@ -85,6 +85,7 @@ export type UploadStorage = {
 type UploadMetadata = {
   title: string;
   description: string;
+  tags: string[];
 };
 
 export type PutRequest = {
@@ -148,6 +149,9 @@ export function chooseTitlesFile(files: Array<{ name: string; updatedAt?: string
   return null;
 }
 
+export const FIXED_VIDEO_TAGS = ['日本株', '株式投資', '投資ニュース', '決算分析'] as const;
+const MAX_YOUTUBE_TAG_LIST_LENGTH = 500;
+
 export function parseTitlesDocument(text: string): { title: string | null; description: string | null } {
   return {
     title: validateTitle(extractTitle(sectionLines(text, 'TITLES'))),
@@ -155,7 +159,63 @@ export function parseTitlesDocument(text: string): { title: string | null; descr
   };
 }
 
-function sectionLines(text: string, name: 'TITLES' | 'DESCRIPTIONS'): string[] {
+export function buildVideoTagsFromDocument(text: string | null): string[] {
+  return buildVideoTags(readExplicitTagSources(text));
+}
+
+export function buildVideoTags(sources: {
+  company?: string | null;
+  ticker?: string | null;
+  industry?: string | null;
+}): string[] {
+  const tags: string[] = [];
+  const seen = new Set<string>();
+  for (const candidate of [sources.company, sources.ticker, sources.industry, ...FIXED_VIDEO_TAGS]) {
+    const tag = normalizeTag(candidate);
+    if (!tag || seen.has(tag)) continue;
+    if (youtubeTagListLength([...tags, tag]) > MAX_YOUTUBE_TAG_LIST_LENGTH) continue;
+    seen.add(tag);
+    tags.push(tag);
+  }
+  return tags;
+}
+
+export function youtubeTagListLength(tags: string[]): number {
+  const bodies = tags.reduce((sum, tag) => sum + tag.length + (/\s/u.test(tag) ? 2 : 0), 0);
+  return bodies + Math.max(0, tags.length - 1);
+}
+
+function readExplicitTagSources(text: string | null): {
+  company: string | null;
+  ticker: string | null;
+  industry: string | null;
+} {
+  const found = { company: null as string | null, ticker: null as string | null, industry: null as string | null };
+  if (!text) return found;
+  for (const line of sectionLines(text, 'THUMBNAIL')) {
+    const company = labeledValue(line, /^(?:COMPANY|企業名)\s*[:：]\s*(.*)$/u);
+    const ticker = labeledValue(line, /^(?:TICKER|銘柄コード)\s*[:：]\s*(.*)$/u);
+    const industry = labeledValue(line, /^(?:INDUSTRY|業界名|業界)\s*[:：]\s*(.*)$/u);
+    if (company && !found.company) found.company = company;
+    if (ticker && !found.ticker) found.ticker = ticker;
+    if (industry && !found.industry) found.industry = industry;
+  }
+  return found;
+}
+
+function labeledValue(line: string, pattern: RegExp): string | null {
+  const match = line.match(pattern);
+  if (!match) return null;
+  return normalizeTag(match[1]);
+}
+
+function normalizeTag(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const tag = value.replace(/\s+/g, ' ').trim();
+  return tag || null;
+}
+
+function sectionLines(text: string, name: string): string[] {
   const lines = text.split(/\r?\n/);
   const start = lines.findIndex((line) => line.trim() === `=== ${name} ===`);
   if (start < 0) return [];
@@ -272,18 +332,20 @@ async function resolveMetadata(
   record: { title?: unknown; description?: unknown },
   videoId: string,
   storage: UploadStorage,
-): Promise<{ ok: true; title: string; description: string } | { ok: false; error: 'title_unavailable' | 'description_unavailable' }> {
+): Promise<({ ok: true } & UploadMetadata) | { ok: false; error: 'title_unavailable' | 'description_unavailable' }> {
   const titleInput = optionalText(record.title);
   const descriptionInput = optionalText(record.description);
   if (titleInput === 'invalid') return { ok: false, error: 'title_unavailable' };
   if (descriptionInput === 'invalid') return { ok: false, error: 'description_unavailable' };
 
+  let titlesText: string | null = null;
   let parsed: { title: string | null; description: string | null } | null = null;
   if (titleInput === 'omit' || descriptionInput === 'omit') {
     const text = await storage.readTitlesFile(videoId);
     if (text === 'missing') {
       return { ok: false, error: titleInput === 'omit' ? 'title_unavailable' : 'description_unavailable' };
     }
+    titlesText = text;
     parsed = parseTitlesDocument(text);
   }
 
@@ -291,7 +353,7 @@ async function resolveMetadata(
   if (!title) return { ok: false, error: 'title_unavailable' };
   const description = descriptionInput === 'omit' ? parsed?.description ?? null : validateDescription(descriptionInput);
   if (!description) return { ok: false, error: 'description_unavailable' };
-  return { ok: true, title, description };
+  return { ok: true, title, description, tags: buildVideoTagsFromDocument(titlesText) };
 }
 
 export function readByteSize(value: unknown): number | null {
@@ -767,8 +829,18 @@ async function startUploadSession(
         snippet: {
           title: metadata.title,
           description: metadata.description,
+          tags: metadata.tags,
+          categoryId: '25',
+          defaultLanguage: 'ja',
         },
-        status: { privacyStatus: 'private' },
+        status: {
+          privacyStatus: 'private',
+          selfDeclaredMadeForKids: false,
+          containsSyntheticMedia: false,
+          embeddable: true,
+          license: 'youtube',
+          publicStatsViewable: true,
+        },
       }),
     });
   } catch {

@@ -4,6 +4,8 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
 
 export const YOUTUBE_UPLOAD_SCOPE = 'https://www.googleapis.com/auth/youtube.upload';
+export const YOUTUBE_SCOPE = 'https://www.googleapis.com/auth/youtube';
+const YOUTUBE_OAUTH_SCOPES = [YOUTUBE_UPLOAD_SCOPE, YOUTUBE_SCOPE] as const;
 
 const GOOGLE_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
@@ -87,7 +89,7 @@ export type TakeDeps = {
 };
 
 export type AccessTokenResult =
-  | { ok: true; accessToken: string; expiresIn: number }
+  | { ok: true; accessToken: string; expiresIn: number; scopes: string[] | null }
   | { ok: false; reason: string };
 
 export type VerifyDeps = {
@@ -389,7 +391,21 @@ export async function handleOauthVerify(request: Request, deps: VerifyDeps = {})
     return htmlResponse('失敗', [reason], 502);
   }
 
-  return htmlResponse('成功', ['アクセストークンを取得できました。'], 200);
+  const grantedScopes = refreshed.scopes;
+  if (grantedScopes === null) {
+    return htmlResponse('失敗', ['scope_missing', 'アクセストークンのスコープを確認できませんでした。'], 502);
+  }
+
+  const missingScopes = YOUTUBE_OAUTH_SCOPES.filter((scope) => !grantedScopes.includes(scope));
+  if (missingScopes.length > 0) {
+    return htmlResponse(
+      '失敗',
+      ['insufficient_scope', ...missingScopes.map((scope) => `不足しているスコープ: ${scope}`)],
+      502,
+    );
+  }
+
+  return htmlResponse('成功', ['アクセストークンを取得できました。', '必要なスコープを確認できました。'], 200);
 }
 
 export function createSupabaseHandoffStore(client?: SupabaseClient): HandoffStore {
@@ -423,7 +439,7 @@ export function buildGoogleAuthUrl(config: OauthConfig, state: string): string {
   url.searchParams.set('client_id', config.clientId);
   url.searchParams.set('redirect_uri', config.redirectUri);
   url.searchParams.set('response_type', 'code');
-  url.searchParams.set('scope', YOUTUBE_UPLOAD_SCOPE);
+  url.searchParams.set('scope', YOUTUBE_OAUTH_SCOPES.join(' '));
   url.searchParams.set('access_type', 'offline');
   url.searchParams.set('prompt', 'consent');
   url.searchParams.set('state', state);
@@ -502,9 +518,14 @@ export async function refreshAccessToken(fetchImpl: typeof fetch = fetch): Promi
     return { ok: false, reason: 'token_exchange_failed' };
   }
 
-  let payload: { error?: unknown; access_token?: unknown; expires_in?: unknown };
+  let payload: { error?: unknown; access_token?: unknown; expires_in?: unknown; scope?: unknown };
   try {
-    payload = (await response.json()) as { error?: unknown; access_token?: unknown; expires_in?: unknown };
+    payload = (await response.json()) as {
+      error?: unknown;
+      access_token?: unknown;
+      expires_in?: unknown;
+      scope?: unknown;
+    };
   } catch {
     return { ok: false, reason: 'token_exchange_failed' };
   }
@@ -521,7 +542,7 @@ export async function refreshAccessToken(fetchImpl: typeof fetch = fetch): Promi
     return { ok: false, reason: 'expires_in_missing' };
   }
 
-  return { ok: true, accessToken: payload.access_token, expiresIn };
+  return { ok: true, accessToken: payload.access_token, expiresIn, scopes: readGrantedScopes(payload.scope) };
 }
 
 async function assertHandoffTable(): Promise<void> {
@@ -602,6 +623,11 @@ function isUsableAccessToken(value: unknown): value is string {
 function readExpiresIn(value: unknown): number | null {
   if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0 || value > 604800) return null;
   return Math.floor(value);
+}
+
+function readGrantedScopes(value: unknown): string[] | null {
+  if (typeof value !== 'string') return null;
+  return value.split(/\s+/).filter((scope) => scope.length > 0);
 }
 
 function publicTokenError(value: unknown): string {

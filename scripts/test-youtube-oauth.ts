@@ -11,6 +11,8 @@ import {
   handleOauthVerify,
   handleTakeRefreshToken,
   refreshAccessToken,
+  YOUTUBE_SCOPE,
+  YOUTUBE_UPLOAD_SCOPE,
   type HandoffStore,
 } from '../src/lib/youtube/oauth';
 
@@ -245,7 +247,7 @@ async function main() {
     assert.equal(target.searchParams.get('client_id'), CLIENT_ID);
     assert.equal(target.searchParams.get('redirect_uri'), REDIRECT_URI);
     assert.equal(target.searchParams.get('response_type'), 'code');
-    assert.equal(target.searchParams.get('scope'), 'https://www.googleapis.com/auth/youtube.upload');
+    assert.equal(target.searchParams.get('scope'), `${YOUTUBE_UPLOAD_SCOPE} ${YOUTUBE_SCOPE}`);
     assert.equal(target.searchParams.get('access_type'), 'offline');
     assert.equal(target.searchParams.get('prompt'), 'consent');
     const state = target.searchParams.get('state') ?? '';
@@ -565,6 +567,7 @@ async function main() {
       if (refreshed.ok) {
         assert.equal(refreshed.accessToken, ACCESS_TOKEN);
         assert.equal(refreshed.expiresIn, 3599);
+        assert.equal(refreshed.scopes, null);
       }
 
       const response = await handleOauthVerify(
@@ -573,16 +576,74 @@ async function main() {
         }),
         {
           fetchImpl: async () =>
-            new Response(JSON.stringify({ access_token: ACCESS_TOKEN, expires_in: 3599 }), { status: 200 }),
+            new Response(
+              JSON.stringify({
+                access_token: ACCESS_TOKEN,
+                expires_in: 3599,
+                scope: `${YOUTUBE_UPLOAD_SCOPE} ${YOUTUBE_SCOPE}`,
+              }),
+              { status: 200 },
+            ),
         },
       );
       const text = await response.text();
       assert.equal(response.status, 200);
       assert.equal(response.headers.get('cache-control'), 'no-store');
       assert.match(text, /成功/);
+      assert.match(text, /必要なスコープを確認できました/);
       assertNoSecrets(text);
     });
     assert.deepEqual(leaks, []);
+  });
+
+  await test('確認 API は不足しているスコープを返す', async () => {
+    applyEnv({ ...configuredEnv(), YOUTUBE_REFRESH_TOKEN: REFRESH_TOKEN });
+    const leaks = await captureOutput(async () => {
+      const response = await handleOauthVerify(
+        new Request('https://autobriefs-production.up.railway.app/api/youtube/oauth/verify', {
+          headers: { authorization: `Bearer ${START_SECRET}`, accept: 'text/html' },
+        }),
+        {
+          fetchImpl: async () =>
+            new Response(
+              JSON.stringify({
+                access_token: ACCESS_TOKEN,
+                expires_in: 3599,
+                scope: YOUTUBE_UPLOAD_SCOPE,
+              }),
+              { status: 200 },
+            ),
+        },
+      );
+      const text = await response.text();
+      assert.equal(response.status, 502);
+      assert.match(text, /失敗/);
+      assert.match(text, /insufficient_scope/);
+      assert.match(text, new RegExp(`不足しているスコープ: ${YOUTUBE_SCOPE}`));
+      assert.equal(text.includes(YOUTUBE_UPLOAD_SCOPE), false);
+      assert.equal(text.includes('成功'), false);
+      assertNoSecrets(text);
+    });
+    assert.deepEqual(leaks, []);
+  });
+
+  await test('確認 API はスコープ未返却を失敗にする', async () => {
+    applyEnv({ ...configuredEnv(), YOUTUBE_REFRESH_TOKEN: REFRESH_TOKEN });
+    const response = await handleOauthVerify(
+      new Request('https://autobriefs-production.up.railway.app/api/youtube/oauth/verify', {
+        headers: { authorization: `Bearer ${START_SECRET}`, accept: 'text/html' },
+      }),
+      {
+        fetchImpl: async () =>
+          new Response(JSON.stringify({ access_token: ACCESS_TOKEN, expires_in: 3599 }), { status: 200 }),
+      },
+    );
+    const text = await response.text();
+    assert.equal(response.status, 502);
+    assert.match(text, /scope_missing/);
+    assert.match(text, /アクセストークンのスコープを確認できませんでした/);
+    assert.equal(text.includes(ACCESS_TOKEN), false);
+    assertNoSecrets(text);
   });
 
   await test('Google のエラー本文は確認 API に出さない', async () => {
