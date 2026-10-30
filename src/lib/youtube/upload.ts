@@ -47,6 +47,15 @@ const SAFE_REASONS = new Set([
   'title_unavailable',
   'description_unavailable',
   'storage_failed',
+  'titles_missing',
+  'thumbnail_fields_missing',
+  'render_failed',
+  'save_failed',
+  'thumbnail_failed',
+  'thumbnail_read_failed',
+  'thumbnail_lock_failed',
+  'thumbnail_in_progress',
+  'thumbnail_incomplete',
   'quotaExceeded',
   'uploadLimitExceeded',
   'forbidden',
@@ -65,6 +74,12 @@ export type UploadStorage = {
   deleteLock(videoId: string): Promise<void>;
   saveMarker(videoId: string, youtubeVideoId: string): Promise<void>;
   readTitlesFile(videoId: string): Promise<string | 'missing'>;
+  readThumbnailSet(videoId: string): Promise<'present' | 'absent' | 'unknown'>;
+  createThumbnailLock(videoId: string): Promise<'created' | 'exists' | 'failed'>;
+  readThumbnailLock(videoId: string): Promise<'setting' | 'incomplete' | 'absent' | 'unknown'>;
+  markThumbnailLockIncomplete(videoId: string): Promise<void>;
+  deleteThumbnailLock(videoId: string): Promise<void>;
+  saveThumbnailSet(videoId: string): Promise<void>;
 };
 
 type UploadMetadata = {
@@ -87,10 +102,18 @@ export type PutResponse = {
 
 export type ListMp4Size = (videoId: string) => Promise<number | 'missing' | 'unknown'>;
 
+export type ThumbnailPngResult =
+  | { ok: true; bytes: Uint8Array; limitExceeded: string[] }
+  | { ok: false; error: string };
+
+export type ThumbnailSetResult = { ok: true } | { ok: false; error: string; unknown?: boolean; status?: number | null };
+
 export type UploadDeps = {
   fetchImpl?: typeof fetch;
   storage?: UploadStorage;
   putImpl?: (request: PutRequest) => Promise<PutResponse>;
+  ensureThumbnail?: (videoId: string) => Promise<ThumbnailPngResult>;
+  setThumbnail?: (accessToken: string, youtubeVideoId: string, png: Uint8Array) => Promise<ThumbnailSetResult>;
 };
 
 type UploadedVideo = {
@@ -319,8 +342,14 @@ export async function handleYoutubeUpload(request: Request, deps: UploadDeps = {
   }
   if (marker === 'invalid') return json({ error: 'marker_invalid' }, 409);
   if (marker !== 'absent') {
+    const thumbnail = await attachThumbnail(storage, fetchImpl, videoId, marker.youtubeVideoId, deps);
     return json(
-      { youtubeVideoId: marker.youtubeVideoId, privacyStatus: 'private', alreadyUploaded: true },
+      {
+        youtubeVideoId: marker.youtubeVideoId,
+        privacyStatus: 'private',
+        alreadyUploaded: true,
+        ...thumbnail,
+      },
       200,
     );
   }
@@ -359,6 +388,7 @@ export async function handleYoutubeUpload(request: Request, deps: UploadDeps = {
   }
 
   let sessionStarted = false;
+  let uploadedVideo: UploadedVideo | null = null;
   try {
     const refreshed = await refreshAccessToken(fetchImpl);
     if (!refreshed.ok) {
@@ -402,24 +432,150 @@ export async function handleYoutubeUpload(request: Request, deps: UploadDeps = {
       );
     }
 
-    try {
-      await storage.deleteLock(videoId);
-    } catch {
-      return json(
-        { youtubeVideoId: uploaded.youtubeVideoId, privacyStatus: 'private', alreadyUploaded: false },
-        200,
-      );
-    }
-    return json(
-      { youtubeVideoId: uploaded.youtubeVideoId, privacyStatus: 'private', alreadyUploaded: false },
-      200,
-    );
+    await storage.deleteLock(videoId).catch(() => undefined);
+    uploadedVideo = uploaded;
   } catch {
     if (!sessionStarted) {
       await storage.deleteLock(videoId).catch(() => undefined);
     }
     return json({ error: 'upload_failed' }, 502);
   }
+
+  if (!uploadedVideo) return json({ error: 'upload_failed' }, 502);
+  const thumbnail = await attachThumbnail(storage, fetchImpl, videoId, uploadedVideo.youtubeVideoId, deps);
+  return json(
+    {
+      youtubeVideoId: uploadedVideo.youtubeVideoId,
+      privacyStatus: 'private',
+      alreadyUploaded: false,
+      ...thumbnail,
+    },
+    200,
+  );
+}
+
+async function attachThumbnail(
+  storage: UploadStorage,
+  fetchImpl: typeof fetch,
+  videoId: string,
+  youtubeVideoId: string,
+  deps: UploadDeps,
+): Promise<{ thumbnailSet: true } | { thumbnailSet: false; thumbnailError: string }> {
+  try {
+    const marked = await storage.readThumbnailSet(videoId);
+    if (marked === 'present') return { thumbnailSet: true };
+    if (marked === 'unknown') return { thumbnailSet: false, thumbnailError: 'thumbnail_read_failed' };
+
+    const lock = await acquireThumbnailLock(storage, videoId);
+    if (lock === 'exists') return { thumbnailSet: false, thumbnailError: 'thumbnail_in_progress' };
+    if (lock !== 'created') return { thumbnailSet: false, thumbnailError: 'thumbnail_lock_failed' };
+
+    let outcomeUnknown = false;
+    try {
+      const again = await storage.readThumbnailSet(videoId);
+      if (again === 'present') {
+        await storage.deleteThumbnailLock(videoId);
+        return { thumbnailSet: true };
+      }
+      if (again === 'unknown') {
+        await storage.deleteThumbnailLock(videoId);
+        return { thumbnailSet: false, thumbnailError: 'thumbnail_read_failed' };
+      }
+
+      const png = await (deps.ensureThumbnail ?? defaultEnsureThumbnail)(videoId);
+      if (!png.ok) {
+        await storage.deleteThumbnailLock(videoId);
+        return { thumbnailSet: false, thumbnailError: publicThumbnailError(png.error) };
+      }
+
+      const refreshed = await refreshAccessToken(fetchImpl);
+      if (!refreshed.ok) {
+        await storage.deleteThumbnailLock(videoId);
+        return { thumbnailSet: false, thumbnailError: publicThumbnailError(safeReason(refreshed.reason)) };
+      }
+
+      outcomeUnknown = true;
+      const setResult = await (deps.setThumbnail ?? ((token, id, bytes) => postThumbnail(fetchImpl, token, id, bytes)))(
+        refreshed.accessToken,
+        youtubeVideoId,
+        png.bytes,
+      );
+      outcomeUnknown = false;
+      if (!setResult.ok) {
+        if (setResult.unknown) {
+          await storage.markThumbnailLockIncomplete(videoId).catch(() => undefined);
+          return { thumbnailSet: false, thumbnailError: 'thumbnail_incomplete' };
+        }
+        logStage('thumbnail_set', setResult.status ?? null, publicThumbnailError(setResult.error));
+        await storage.deleteThumbnailLock(videoId);
+        return { thumbnailSet: false, thumbnailError: publicThumbnailError(setResult.error) };
+      }
+
+      await storage.saveThumbnailSet(videoId);
+      await storage.deleteThumbnailLock(videoId).catch(() => undefined);
+      return { thumbnailSet: true };
+    } catch {
+      if (outcomeUnknown) {
+        await storage.markThumbnailLockIncomplete(videoId).catch(() => undefined);
+        return { thumbnailSet: false, thumbnailError: 'thumbnail_incomplete' };
+      }
+      await storage.deleteThumbnailLock(videoId).catch(() => undefined);
+      return { thumbnailSet: false, thumbnailError: 'thumbnail_failed' };
+    }
+  } catch {
+    return { thumbnailSet: false, thumbnailError: 'thumbnail_failed' };
+  }
+}
+
+async function acquireThumbnailLock(storage: UploadStorage, videoId: string): Promise<'created' | 'exists' | 'failed'> {
+  const created = await storage.createThumbnailLock(videoId);
+  if (created !== 'exists') return created;
+  const state = await storage.readThumbnailLock(videoId);
+  if (state !== 'incomplete') return 'exists';
+  await storage.deleteThumbnailLock(videoId);
+  return storage.createThumbnailLock(videoId);
+}
+
+async function defaultEnsureThumbnail(videoId: string): Promise<ThumbnailPngResult> {
+  const thumbnail = await import('@/lib/youtube/thumbnail');
+  return thumbnail.ensureYoutubeThumbnailPng(videoId);
+}
+
+async function postThumbnail(
+  fetchImpl: typeof fetch,
+  accessToken: string,
+  youtubeVideoId: string,
+  png: Uint8Array,
+): Promise<ThumbnailSetResult> {
+  const url = new URL('https://www.googleapis.com/upload/youtube/v3/thumbnails/set');
+  url.searchParams.set('videoId', youtubeVideoId);
+  url.searchParams.set('uploadType', 'media');
+  let response: Response;
+  try {
+    response = await fetchImpl(url, {
+      method: 'POST',
+      redirect: 'manual',
+      cache: 'no-store',
+      signal: AbortSignal.timeout(30_000),
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'image/png',
+      },
+      body: Buffer.from(png),
+    });
+  } catch {
+    return { ok: false, error: 'thumbnail_incomplete', unknown: true };
+  }
+  if (response.status === 200) {
+    await response.body?.cancel().catch(() => undefined);
+    return { ok: true };
+  }
+  const bodyText = await readLimitedText(response);
+  return { ok: false, error: youtubeReason(bodyText), status: response.status };
+}
+
+function publicThumbnailError(code: string): string {
+  return SAFE_REASONS.has(code) ? code : 'thumbnail_failed';
 }
 
 export function createSupabaseUploadStorage(
@@ -534,7 +690,58 @@ export function createSupabaseUploadStorage(
       if (!downloaded.data) return 'missing';
       return (await downloaded.data.text()).slice(0, MAX_REQUEST_BYTES);
     },
+    async readThumbnailSet(videoId) {
+      return findNamedObject(videoId, 'youtube-thumbnail-set.txt');
+    },
+    async createThumbnailLock(videoId) {
+      const { error } = await getSupabaseAdmin().storage.from(BUCKET).upload(thumbnailLockPath(videoId), 'setting', {
+        upsert: false,
+        contentType: 'text/plain',
+        cacheControl: '0',
+      });
+      if (!error) return 'created';
+      if (isAlreadyExists(error)) return 'exists';
+      logStage('thumbnail_lock', storageStatus(error) || null, storageErrorCode(error));
+      return 'failed';
+    },
+    async readThumbnailLock(videoId) {
+      const found = await findNamedObject(videoId, 'youtube-thumbnail-lock.txt');
+      if (found !== 'present') return found;
+      const downloaded = await getSupabaseAdmin().storage.from(BUCKET).download(thumbnailLockPath(videoId));
+      if (downloaded.error || !downloaded.data) return 'unknown';
+      const text = (await downloaded.data.text()).trim();
+      if (text === 'setting' || text === 'incomplete') return text;
+      return 'unknown';
+    },
+    async markThumbnailLockIncomplete(videoId) {
+      const { error } = await getSupabaseAdmin().storage.from(BUCKET).upload(thumbnailLockPath(videoId), 'incomplete', {
+        upsert: true,
+        contentType: 'text/plain',
+        cacheControl: '0',
+      });
+      if (error) logStage('thumbnail_lock', storageStatus(error) || null, storageErrorCode(error));
+    },
+    async deleteThumbnailLock(videoId) {
+      await getSupabaseAdmin().storage.from(BUCKET).remove([thumbnailLockPath(videoId)]);
+    },
+    async saveThumbnailSet(videoId) {
+      const { error } = await getSupabaseAdmin().storage.from(BUCKET).upload(thumbnailSetPath(videoId), 'set', {
+        upsert: true,
+        contentType: 'text/plain',
+        cacheControl: '0',
+      });
+      if (error) throw new UploadStageError('thumbnail_failed', storageStatus(error) || null, storageErrorCode(error));
+    },
   };
+}
+
+async function findNamedObject(videoId: string, name: string): Promise<'present' | 'absent' | 'unknown'> {
+  const { data, error } = await getSupabaseAdmin().storage.from(BUCKET).list(videoId, { limit: 100, search: name });
+  if (error) {
+    logStage('thumbnail_read', storageStatus(error) || null, storageErrorCode(error));
+    return 'unknown';
+  }
+  return (data ?? []).some((item) => item.name === name) ? 'present' : 'absent';
 }
 
 async function startUploadSession(
@@ -825,6 +1032,14 @@ function mp4Path(videoId: string): string {
 
 function lockPath(videoId: string): string {
   return `${videoId}/youtube-upload-lock.txt`;
+}
+
+function thumbnailLockPath(videoId: string): string {
+  return `${videoId}/youtube-thumbnail-lock.txt`;
+}
+
+function thumbnailSetPath(videoId: string): string {
+  return `${videoId}/youtube-thumbnail-set.txt`;
 }
 
 class UploadStageError extends Error {

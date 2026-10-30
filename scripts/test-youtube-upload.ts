@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 import { POST as uploadRoute } from '../src/app/api/youtube/upload/route';
+import { ensureYoutubeThumbnailPng } from '../src/lib/youtube/thumbnail';
 import {
   chooseTitlesFile,
   createSupabaseUploadStorage,
@@ -55,6 +56,9 @@ type FakeStorage = UploadStorage & {
   markerSaves: string[];
   titles: string | 'missing';
   titlesReads: number;
+  thumbnailSet: 'present' | 'absent' | 'unknown';
+  thumbnailLock: 'absent' | 'setting' | 'incomplete';
+  thumbnailSetSaves: number;
 };
 
 function streamOf(length: number): ReadableStream<Uint8Array> {
@@ -75,6 +79,9 @@ function fakeStorage(size: number | 'missing' | 'unknown' = 8): FakeStorage {
     markerSaves: [],
     titles: SAMPLE_TITLES,
     titlesReads: 0,
+    thumbnailSet: 'present',
+    thumbnailLock: 'absent',
+    thumbnailSetSaves: 0,
     async readMarker() {
       if (state.marker === 'bad') return 'invalid';
       if (!state.marker) return 'absent';
@@ -104,6 +111,27 @@ function fakeStorage(size: number | 'missing' | 'unknown' = 8): FakeStorage {
     async readTitlesFile() {
       state.titlesReads += 1;
       return state.titles;
+    },
+    async readThumbnailSet() {
+      return state.thumbnailSet;
+    },
+    async createThumbnailLock() {
+      if (state.thumbnailLock !== 'absent') return 'exists';
+      state.thumbnailLock = 'setting';
+      return 'created';
+    },
+    async readThumbnailLock() {
+      return state.thumbnailLock;
+    },
+    async markThumbnailLockIncomplete() {
+      state.thumbnailLock = 'incomplete';
+    },
+    async deleteThumbnailLock() {
+      state.thumbnailLock = 'absent';
+    },
+    async saveThumbnailSet() {
+      state.thumbnailSetSaves += 1;
+      state.thumbnailSet = 'present';
     },
   };
   return state;
@@ -174,6 +202,47 @@ function tokenFetch(onSession?: (body: string) => void): typeof fetch {
     }
     throw new Error(`unexpected fetch ${target}`);
   }) as typeof fetch;
+}
+
+function pngBytes(): Uint8Array {
+  const png = new Uint8Array(24);
+  png.set([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82]);
+  const view = new DataView(png.buffer);
+  view.setUint32(16, 1280);
+  view.setUint32(20, 720);
+  return png;
+}
+
+function countingFetch(onThumb?: (body: Uint8Array) => void, thumbStatus = 200): {
+  fetchImpl: typeof fetch;
+  counts: { videos: number; thumbs: number };
+} {
+  const counts = { videos: 0, thumbs: 0 };
+  const fetchImpl = (async (url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    const target = String(url);
+    if (target.includes('oauth2.googleapis.com/token')) {
+      return new Response(JSON.stringify({ access_token: ACCESS_TOKEN, expires_in: 3599 }), { status: 200 });
+    }
+    if (target.includes('/upload/youtube/v3/videos')) {
+      counts.videos += 1;
+      return new Response(null, { status: 200, headers: { Location: SESSION_URL } });
+    }
+    if (target.includes('/upload/youtube/v3/thumbnails/set')) {
+      counts.thumbs += 1;
+      const headers = new Headers(init?.headers);
+      assert.equal(headers.get('content-type'), 'image/png');
+      assert.equal(headers.get('authorization'), `Bearer ${ACCESS_TOKEN}`);
+      assert.match(target, new RegExp(`[?&]videoId=${YOUTUBE_ID}(&|$)`));
+      assert.match(target, /[?&]uploadType=media(&|$)/);
+      const body = init?.body;
+      assert.ok(body instanceof Uint8Array);
+      onThumb?.(body);
+      if (thumbStatus === 200) return new Response('{}', { status: 200 });
+      return new Response(JSON.stringify({ error: { errors: [{ reason: 'forbidden' }] } }), { status: thumbStatus });
+    }
+    throw new Error(`unexpected fetch ${target}`);
+  }) as typeof fetch;
+  return { fetchImpl, counts };
 }
 
 function successPut(): { put: (request: PutRequest) => Promise<PutResponse>; calls: PutRequest[] } {
@@ -877,6 +946,254 @@ ${'あ'.repeat(5001)}
     assert.equal(sent.snippet.description, '明示した説明');
     assert.equal(sent.status.privacyStatus, 'private');
     assert.equal(storage.titlesReads, 0);
+  });
+
+  await test('動画アップロードとサムネイル設定が両方成功する', async () => {
+    applyEnv(configuredEnv());
+    const storage = fakeStorage();
+    storage.thumbnailSet = 'absent';
+    const png = pngBytes();
+    const seen: Buffer[] = [];
+    const youtube = countingFetch((body) => seen.push(Buffer.from(body)));
+    const response = await handleYoutubeUpload(uploadRequest({ videoId: VIDEO_ID }, `Bearer ${START_SECRET}`), {
+      storage,
+      fetchImpl: youtube.fetchImpl,
+      putImpl: successPut().put,
+      ensureThumbnail: async () => ({ ok: true, bytes: png, limitExceeded: ['HEADLINE'] }),
+    });
+    const body = await response.json() as { youtubeVideoId: string; alreadyUploaded: boolean; privacyStatus: string; thumbnailSet: boolean };
+    assert.equal(response.status, 200);
+    assert.equal(body.youtubeVideoId, YOUTUBE_ID);
+    assert.equal(body.alreadyUploaded, false);
+    assert.equal(body.privacyStatus, 'private');
+    assert.equal(body.thumbnailSet, true);
+    assert.equal(youtube.counts.videos, 1);
+    assert.equal(youtube.counts.thumbs, 1);
+    assert.equal(storage.thumbnailSetSaves, 1);
+    assert.equal(storage.thumbnailLock, 'absent');
+    assert.equal(storage.lock, 'absent');
+    assert.ok(seen[0]?.equals(Buffer.from(png)));
+  });
+
+  await test('サムネイル設定失敗でもアップロード成功を維持する', async () => {
+    applyEnv(configuredEnv());
+    const storage = fakeStorage();
+    storage.thumbnailSet = 'absent';
+    const youtube = countingFetch(undefined, 403);
+    const response = await handleYoutubeUpload(uploadRequest({ videoId: VIDEO_ID }, `Bearer ${START_SECRET}`), {
+      storage,
+      fetchImpl: youtube.fetchImpl,
+      putImpl: successPut().put,
+      ensureThumbnail: async () => ({ ok: true, bytes: pngBytes(), limitExceeded: [] }),
+    });
+    const body = await response.json() as { alreadyUploaded: boolean; privacyStatus: string; thumbnailSet: boolean; thumbnailError: string };
+    assert.equal(response.status, 200);
+    assert.equal(body.alreadyUploaded, false);
+    assert.equal(body.privacyStatus, 'private');
+    assert.equal(body.thumbnailSet, false);
+    assert.equal(body.thumbnailError, 'forbidden');
+    assert.equal(youtube.counts.videos, 1);
+    assert.equal(storage.marker, YOUTUBE_ID);
+    assert.equal(storage.thumbnailSetSaves, 0);
+    assert.equal(storage.thumbnailLock, 'absent');
+    assert.equal(storage.lockDeleted, true);
+  });
+
+  await test('アップロード済みで未設定ならサムネイルだけ再実行する', async () => {
+    applyEnv(configuredEnv());
+    const storage = fakeStorage();
+    storage.marker = YOUTUBE_ID;
+    storage.thumbnailSet = 'absent';
+    const png = pngBytes();
+    let generated = 0;
+    const youtube = countingFetch();
+    const response = await handleYoutubeUpload(uploadRequest({ videoId: VIDEO_ID }, `Bearer ${START_SECRET}`), {
+      storage,
+      fetchImpl: youtube.fetchImpl,
+      putImpl: async () => {
+        throw new Error('put should not run');
+      },
+      ensureThumbnail: (videoId) => ensureYoutubeThumbnailPng(videoId, {
+        readStoredPng: async () => png,
+        generate: async () => {
+          generated += 1;
+          return { ok: false, error: 'render_failed' };
+        },
+      }),
+    });
+    const body = await response.json() as { alreadyUploaded: boolean; thumbnailSet: boolean; youtubeVideoId: string };
+    assert.equal(response.status, 200);
+    assert.equal(body.alreadyUploaded, true);
+    assert.equal(body.youtubeVideoId, YOUTUBE_ID);
+    assert.equal(body.thumbnailSet, true);
+    assert.equal(generated, 0);
+    assert.equal(youtube.counts.videos, 0);
+    assert.equal(youtube.counts.thumbs, 1);
+    assert.equal(storage.markerSaves.length, 0);
+    assert.equal(storage.titlesReads, 0);
+  });
+
+  await test('サムネイル設定済みなら thumbnails.set を呼ばない', async () => {
+    applyEnv(configuredEnv());
+    const storage = fakeStorage();
+    storage.marker = YOUTUBE_ID;
+    storage.thumbnailSet = 'present';
+    let called = false;
+    const response = await handleYoutubeUpload(uploadRequest({ videoId: VIDEO_ID }, `Bearer ${START_SECRET}`), {
+      storage,
+      fetchImpl: (async () => {
+        called = true;
+        throw new Error('fetch should not run');
+      }) as typeof fetch,
+      putImpl: async () => {
+        throw new Error('put should not run');
+      },
+    });
+    const body = await response.json() as { alreadyUploaded: boolean; thumbnailSet: boolean; thumbnailError?: string };
+    assert.equal(response.status, 200);
+    assert.equal(body.alreadyUploaded, true);
+    assert.equal(body.thumbnailSet, true);
+    assert.equal(body.thumbnailError, undefined);
+    assert.equal(called, false);
+  });
+
+  await test('PNG生成失敗でも動画を再アップロードしない', async () => {
+    applyEnv(configuredEnv());
+    const fresh = fakeStorage();
+    fresh.thumbnailSet = 'absent';
+    const freshYoutube = countingFetch();
+    const freshResponse = await handleYoutubeUpload(uploadRequest({ videoId: VIDEO_ID }, `Bearer ${START_SECRET}`), {
+      storage: fresh,
+      fetchImpl: freshYoutube.fetchImpl,
+      putImpl: successPut().put,
+      ensureThumbnail: async () => ({ ok: false, error: 'render_failed' }),
+    });
+    const freshBody = await freshResponse.json() as { thumbnailSet: boolean; thumbnailError: string; alreadyUploaded: boolean };
+    assert.equal(freshResponse.status, 200);
+    assert.equal(freshBody.alreadyUploaded, false);
+    assert.equal(freshBody.thumbnailSet, false);
+    assert.equal(freshBody.thumbnailError, 'render_failed');
+    assert.equal(freshYoutube.counts.videos, 1);
+    assert.equal(freshYoutube.counts.thumbs, 0);
+    assert.equal(fresh.marker, YOUTUBE_ID);
+    assert.equal(fresh.thumbnailLock, 'absent');
+
+    const stored = fakeStorage();
+    stored.marker = YOUTUBE_ID;
+    stored.thumbnailSet = 'absent';
+    const storedYoutube = countingFetch();
+    const storedResponse = await handleYoutubeUpload(uploadRequest({ videoId: VIDEO_ID }, `Bearer ${START_SECRET}`), {
+      storage: stored,
+      fetchImpl: storedYoutube.fetchImpl,
+      putImpl: async () => {
+        throw new Error('put should not run');
+      },
+      ensureThumbnail: async () => ({ ok: false, error: 'thumbnail_fields_missing' }),
+    });
+    const storedBody = await storedResponse.json() as { alreadyUploaded: boolean; thumbnailSet: boolean; thumbnailError: string };
+    assert.equal(storedResponse.status, 200);
+    assert.equal(storedBody.alreadyUploaded, true);
+    assert.equal(storedBody.thumbnailSet, false);
+    assert.equal(storedBody.thumbnailError, 'thumbnail_fields_missing');
+    assert.equal(storedYoutube.counts.videos, 0);
+    assert.equal(storedYoutube.counts.thumbs, 0);
+    assert.equal(stored.markerSaves.length, 0);
+  });
+
+  await test('サムネイル設定の同時実行を防ぎ不明な失敗から復旧する', async () => {
+    applyEnv(configuredEnv());
+    const storage = fakeStorage();
+    storage.marker = YOUTUBE_ID;
+    storage.thumbnailSet = 'absent';
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let sets = 0;
+    const firstPromise = handleYoutubeUpload(uploadRequest({ videoId: VIDEO_ID }, `Bearer ${START_SECRET}`), {
+      storage,
+      fetchImpl: tokenFetch(),
+      putImpl: async () => {
+        throw new Error('put should not run');
+      },
+      ensureThumbnail: async () => ({ ok: true, bytes: pngBytes(), limitExceeded: [] }),
+      setThumbnail: async () => {
+        sets += 1;
+        await gate;
+        return { ok: true };
+      },
+    });
+    for (let attempt = 0; attempt < 50 && sets !== 1; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(sets, 1);
+    assert.equal(storage.thumbnailLock, 'setting');
+    const second = await handleYoutubeUpload(uploadRequest({ videoId: VIDEO_ID }, `Bearer ${START_SECRET}`), {
+      storage,
+      fetchImpl: tokenFetch(),
+      putImpl: async () => {
+        throw new Error('put should not run');
+      },
+      ensureThumbnail: async () => ({ ok: true, bytes: pngBytes(), limitExceeded: [] }),
+      setThumbnail: async () => {
+        sets += 1;
+        return { ok: true };
+      },
+    });
+    const secondBody = await second.json() as { thumbnailSet: boolean; thumbnailError: string; alreadyUploaded: boolean };
+    assert.equal(second.status, 200);
+    assert.equal(secondBody.alreadyUploaded, true);
+    assert.equal(secondBody.thumbnailSet, false);
+    assert.equal(secondBody.thumbnailError, 'thumbnail_in_progress');
+    assert.equal(sets, 1);
+    assert.equal(storage.marker, YOUTUBE_ID);
+    release();
+    const first = await firstPromise;
+    const firstBody = await first.json() as { thumbnailSet: boolean };
+    assert.equal(firstBody.thumbnailSet, true);
+    assert.equal(sets, 1);
+    assert.equal(storage.thumbnailLock, 'absent');
+
+    const failed = fakeStorage();
+    failed.marker = YOUTUBE_ID;
+    failed.thumbnailSet = 'absent';
+    let thumbs = 0;
+    const flaky = (async (url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      const target = String(url);
+      if (target.includes('oauth2.googleapis.com/token')) {
+        return new Response(JSON.stringify({ access_token: ACCESS_TOKEN, expires_in: 3599 }), { status: 200 });
+      }
+      if (target.includes('/upload/youtube/v3/thumbnails/set')) {
+        thumbs += 1;
+        if (thumbs === 1) throw new Error('socket hang up');
+        return new Response('{}', { status: 200 });
+      }
+      throw new Error(`unexpected fetch ${target}`);
+    }) as typeof fetch;
+    const broken = await handleYoutubeUpload(uploadRequest({ videoId: VIDEO_ID }, `Bearer ${START_SECRET}`), {
+      storage: failed,
+      fetchImpl: flaky,
+      ensureThumbnail: async () => ({ ok: true, bytes: pngBytes(), limitExceeded: [] }),
+    });
+    const brokenBody = await broken.json() as { thumbnailSet: boolean; thumbnailError: string; alreadyUploaded: boolean };
+    assert.equal(broken.status, 200);
+    assert.equal(brokenBody.alreadyUploaded, true);
+    assert.equal(brokenBody.thumbnailSet, false);
+    assert.equal(brokenBody.thumbnailError, 'thumbnail_incomplete');
+    assert.equal(failed.thumbnailLock, 'incomplete');
+    assert.equal(failed.thumbnailSetSaves, 0);
+    const recovered = await handleYoutubeUpload(uploadRequest({ videoId: VIDEO_ID }, `Bearer ${START_SECRET}`), {
+      storage: failed,
+      fetchImpl: flaky,
+      ensureThumbnail: async () => ({ ok: true, bytes: pngBytes(), limitExceeded: [] }),
+    });
+    const recoveredBody = await recovered.json() as { thumbnailSet: boolean; alreadyUploaded: boolean };
+    assert.equal(recovered.status, 200);
+    assert.equal(recoveredBody.alreadyUploaded, true);
+    assert.equal(recoveredBody.thumbnailSet, true);
+    assert.equal(thumbs, 2);
+    assert.equal(failed.thumbnailLock, 'absent');
+    assert.equal(failed.markerSaves.length, 0);
   });
 
   await test('ログは段階とステータスだけを出す', async () => {
