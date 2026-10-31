@@ -101,6 +101,10 @@ export type UploadStorage = {
   markScheduleLockIncomplete(videoId: string): Promise<void>;
   deleteScheduleLock(videoId: string): Promise<void>;
   saveSchedule(videoId: string, youtubeVideoId: string, publishAt: string): Promise<void>;
+  listScheduledPublishAts(): Promise<string[] | 'unknown'>;
+  readSlot(publishAt: string): Promise<'absent' | 'unknown' | { videoId: string }>;
+  createSlot(publishAt: string, videoId: string): Promise<'created' | 'exists' | 'failed'>;
+  deleteSlot(publishAt: string, videoId: string): Promise<'deleted' | 'kept' | 'failed'>;
 };
 
 type UploadMetadata = {
@@ -148,12 +152,30 @@ const PUBLISH_AT_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
 const TOKYO_OFFSET_MS = 9 * 60 * 60 * 1000;
 const PUBLISH_SAFETY_MS = 60 * 1000;
 
-export function nextYoutubePublishAt(now: Date): string {
+const PUBLISH_SLOT_HOURS = [7, 19] as const;
+const PUBLISH_SLOT_DAYS = 21;
+
+export function nextYoutubePublishAt(now: Date, taken?: ReadonlySet<string>): string | null {
+  for (const slot of publishSlotInstants(now)) {
+    if (taken?.has(slot)) continue;
+    return slot;
+  }
+  return null;
+}
+
+function publishSlotInstants(now: Date): string[] {
   const tokyo = new Date(now.getTime() + TOKYO_OFFSET_MS);
-  let publishAt = Date.UTC(tokyo.getUTCFullYear(), tokyo.getUTCMonth(), tokyo.getUTCDate(), 19, 15, 0, 0) - TOKYO_OFFSET_MS;
-  if (now.getTime() >= publishAt) publishAt += 24 * 60 * 60 * 1000;
-  if (publishAt - now.getTime() < PUBLISH_SAFETY_MS) publishAt += 24 * 60 * 60 * 1000;
-  return formatUtcSeconds(publishAt);
+  const start = Date.UTC(tokyo.getUTCFullYear(), tokyo.getUTCMonth(), tokyo.getUTCDate());
+  const slots: string[] = [];
+  for (let day = 0; day < PUBLISH_SLOT_DAYS; day += 1) {
+    const date = new Date(start + day * 24 * 60 * 60 * 1000);
+    for (const hour of PUBLISH_SLOT_HOURS) {
+      const at = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), hour, 15, 0, 0) - TOKYO_OFFSET_MS;
+      if (at - now.getTime() < PUBLISH_SAFETY_MS) continue;
+      slots.push(formatUtcSeconds(at));
+    }
+  }
+  return slots;
 }
 
 export function validateVideoId(value: unknown): string | null {
@@ -672,6 +694,7 @@ async function attachSchedule(
     if (lock !== 'created') return scheduleFailure('schedule_lock_failed');
 
     let outcomeUnknown = false;
+    let claimedPublishAt: string | null = null;
     try {
       const again = await storage.readSchedule(videoId);
       const held = scheduleFromMarker(again, youtubeVideoId);
@@ -709,13 +732,24 @@ async function attachSchedule(
         return saved;
       }
 
-      const publishAt = nextYoutubePublishAt((deps.now ?? (() => new Date()))());
+      const taken = await storage.listScheduledPublishAts();
+      if (taken === 'unknown') {
+        await storage.deleteScheduleLock(videoId);
+        return scheduleFailure('schedule_read_failed');
+      }
+      const claimed = await claimPublishSlot(storage, videoId, (deps.now ?? (() => new Date()))(), new Set(taken));
+      if (!claimed.ok) {
+        await storage.deleteScheduleLock(videoId);
+        return scheduleFailure(claimed.error);
+      }
+      claimedPublishAt = claimed.publishAt;
+
       outcomeUnknown = true;
       const updated = await updateVideoSchedule(
         fetchImpl,
         refreshed.accessToken,
         youtubeVideoId,
-        publishAt,
+        claimed.publishAt,
         listed.status,
       );
       outcomeUnknown = false;
@@ -725,6 +759,8 @@ async function attachSchedule(
           return scheduleFailure('schedule_incomplete');
         }
         logStage('schedule_set', updated.status ?? null, publicScheduleError(updated.error));
+        await storage.deleteSlot(claimed.publishAt, videoId);
+        claimedPublishAt = null;
         await storage.deleteScheduleLock(videoId);
         return scheduleFailure(updated.error);
       }
@@ -737,6 +773,7 @@ async function attachSchedule(
         await storage.markScheduleLockIncomplete(videoId).catch(() => undefined);
         return scheduleFailure('schedule_incomplete');
       }
+      if (claimedPublishAt) await storage.deleteSlot(claimedPublishAt, videoId).catch(() => undefined);
       await storage.deleteScheduleLock(videoId).catch(() => undefined);
       return scheduleFailure('schedule_failed');
     }
@@ -752,6 +789,30 @@ function scheduleFromMarker(
   if (marked === 'absent' || marked === 'unknown') return null;
   if (marked === 'invalid' || marked.youtubeVideoId !== youtubeVideoId) return scheduleFailure('schedule_marker_invalid');
   return { scheduled: true, publishAt: marked.publishAt };
+}
+
+async function claimPublishSlot(
+  storage: UploadStorage,
+  videoId: string,
+  now: Date,
+  taken: ReadonlySet<string>,
+): Promise<{ ok: true; publishAt: string } | { ok: false; error: string }> {
+  const slots = publishSlotInstants(now);
+  for (const slot of slots) {
+    const current = await storage.readSlot(slot);
+    if (current === 'unknown') return { ok: false, error: 'schedule_read_failed' };
+    if (current !== 'absent' && current.videoId === videoId) return { ok: true, publishAt: slot };
+  }
+  for (const slot of slots) {
+    if (taken.has(slot)) continue;
+    const created = await storage.createSlot(slot, videoId);
+    if (created === 'failed') return { ok: false, error: 'schedule_lock_failed' };
+    if (created === 'created') return { ok: true, publishAt: slot };
+    const current = await storage.readSlot(slot);
+    if (current === 'unknown') return { ok: false, error: 'schedule_read_failed' };
+    if (current !== 'absent' && current.videoId === videoId) return { ok: true, publishAt: slot };
+  }
+  return { ok: false, error: 'schedule_failed' };
 }
 
 async function rememberSchedule(
@@ -1109,6 +1170,59 @@ export function createSupabaseUploadStorage(
       }
       throw new UploadStageError('schedule_marker_write_failed', storageStatus(error) || null, storageErrorCode(error));
     },
+    async listScheduledPublishAts() {
+      const folders = await listVideoFolders();
+      if (folders === 'unknown') return 'unknown';
+      const times: string[] = [];
+      for (const folder of folders) {
+        const schedule = await this.readSchedule(folder);
+        if (schedule === 'unknown') return 'unknown';
+        if (schedule === 'absent' || schedule === 'invalid') continue;
+        times.push(schedule.publishAt);
+      }
+      return times;
+    },
+    async readSlot(publishAt) {
+      const path = slotPath(publishAt);
+      if (!path) return 'unknown';
+      const downloaded = await getSupabaseAdmin().storage.from(BUCKET).download(path);
+      if (downloaded.error) {
+        if (await isNotFound(downloaded.error)) return 'absent';
+        logStage('schedule_read', storageStatus(downloaded.error) || null, storageErrorCode(downloaded.error));
+        return 'unknown';
+      }
+      if (!downloaded.data) return 'unknown';
+      const videoId = (await downloaded.data.text()).trim();
+      if (!VIDEO_ID_PATTERN.test(videoId)) return 'unknown';
+      return { videoId };
+    },
+    async createSlot(publishAt, videoId) {
+      const path = slotPath(publishAt);
+      if (!path || !validateVideoId(videoId)) return 'failed';
+      const { error } = await getSupabaseAdmin().storage.from(BUCKET).upload(path, videoId, {
+        upsert: false,
+        contentType: 'text/plain',
+        cacheControl: '0',
+      });
+      if (!error) return 'created';
+      if (isAlreadyExists(error)) return 'exists';
+      logStage('schedule_slot', storageStatus(error) || null, storageErrorCode(error));
+      return 'failed';
+    },
+    async deleteSlot(publishAt, videoId) {
+      const current = await this.readSlot(publishAt);
+      if (current === 'unknown') return 'failed';
+      if (current === 'absent') return 'deleted';
+      if (current.videoId !== videoId) return 'kept';
+      const path = slotPath(publishAt);
+      if (!path) return 'failed';
+      const { error } = await getSupabaseAdmin().storage.from(BUCKET).remove([path]);
+      if (error) {
+        logStage('schedule_slot', storageStatus(error) || null, storageErrorCode(error));
+        return 'failed';
+      }
+      return 'deleted';
+    },
   };
 }
 
@@ -1439,6 +1553,28 @@ function schedulePath(videoId: string): string {
 
 function scheduleLockPath(videoId: string): string {
   return `${videoId}/youtube-schedule-lock.txt`;
+}
+
+function slotPath(publishAt: string): string | null {
+  if (!PUBLISH_AT_PATTERN.test(publishAt)) return null;
+  return `99_System/youtube-publish-slots/${publishAt.replace(/[-:]/g, '')}.txt`;
+}
+
+async function listVideoFolders(): Promise<string[] | 'unknown'> {
+  const names: string[] = [];
+  for (let offset = 0; offset < 2000; offset += 100) {
+    const { data, error } = await getSupabaseAdmin().storage.from(BUCKET).list('', { limit: 100, offset });
+    if (error) {
+      logStage('schedule_read', storageStatus(error) || null, storageErrorCode(error));
+      return 'unknown';
+    }
+    const page = data ?? [];
+    for (const item of page) {
+      if (VIDEO_ID_PATTERN.test(item.name)) names.push(item.name);
+    }
+    if (page.length < 100) return names;
+  }
+  return 'unknown';
 }
 
 function formatUtcSeconds(ms: number): string {
