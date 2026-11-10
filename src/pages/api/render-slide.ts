@@ -7,11 +7,11 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import puppeteer from 'puppeteer';
 
 import {
+  createSegmentBrowserPool,
   formatSlideRenderStatus,
   getSegmentRenderQueue,
   runSegmentRenderAttempts,
   slideRenderStatusPath,
-  withSegmentBrowser,
 } from '@/lib/slides/segment-render-queue';
 
 const SUPABASE_URL = process.env.SUPABASE_URL!;
@@ -49,7 +49,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       const result = await runSegmentRenderAttempts(async (attempt) => {
         try {
           console.log(`🔁 Segment slide rendering attempt ${attempt}`);
-          await renderSlide(html, videoId, segmentId, attempt);
+          await renderSlide(html, videoId, segmentId);
           console.log('✅ Segment slide rendering succeeded');
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
@@ -75,11 +75,20 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   }
 }
 
-async function renderSlide(html: string, videoId: string, segmentId: string, attempt: number) {
-  const userDataDir = `/tmp/puppeteer_segment_${videoId}_${segmentId}_attempt_${attempt}`;
-  const imageBuffer = await withSegmentBrowser(
-    userDataDir,
-    () =>
+let browserGeneration = 0;
+
+function createPool() {
+  return createSegmentBrowserPool({
+    createUserDataDir() {
+      browserGeneration += 1;
+      return `/tmp/puppeteer_segment_${process.pid}_${browserGeneration}`;
+    },
+    removeDir: (dir) => rm(dir, { recursive: true, force: true }),
+    isBusy: () => {
+      const queue = getSegmentRenderQueue();
+      return queue.active > 0 || queue.waiting > 0;
+    },
+    launch: (userDataDir) =>
       puppeteer.launch({
         headless: true,
         args: [
@@ -91,14 +100,22 @@ async function renderSlide(html: string, videoId: string, segmentId: string, att
           `--user-data-dir=${userDataDir}`,
         ],
       }),
-    async (browser) => {
-      const page = await browser.newPage();
-      await page.setViewport({ width: 1920, height: 1080 });
-      await page.setContent(html, { waitUntil: 'networkidle0' });
-      return page.screenshot({ type: 'png', omitBackground: true });
-    },
-    (dir) => rm(dir, { recursive: true, force: true }),
-  );
+  });
+}
+
+let segmentBrowserPool: ReturnType<typeof createPool> | null = null;
+
+function getSegmentBrowser() {
+  segmentBrowserPool ??= createPool();
+  return segmentBrowserPool;
+}
+
+async function renderSlide(html: string, videoId: string, segmentId: string) {
+  const imageBuffer = await getSegmentBrowser().withPage(async (page) => {
+    await page.setViewport({ width: 1920, height: 1080 });
+    await page.setContent(html, { waitUntil: 'networkidle0' });
+    return page.screenshot({ type: 'png', omitBackground: true });
+  });
 
   const filePath = `${videoId}/${segmentId}/slide.png`;
   const { error: uploadError } = await supabase.storage.from('projects').upload(filePath, imageBuffer, {
