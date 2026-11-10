@@ -478,6 +478,25 @@ async function main() {
     assert.equal(pool.hasBrowser(), false);
   });
 
+  await test('呼び出しごとの上限がプール既定より長ければ正常な処理を30秒相当で切らない', async () => {
+    const pool = createSegmentBrowserPool({
+      pageTimeoutMs: 30,
+      createUserDataDir: () => '/tmp/segment-timeout-override',
+      removeDir: async () => undefined,
+      launch: async () => ({
+        async newPage() {
+          return { async close() {} };
+        },
+        async close() {},
+      }),
+    });
+    const value = await pool.withPage(async () => {
+      await sleep(80);
+      return 'kept';
+    }, 200);
+    assert.equal(value, 'kept');
+  });
+
   if (process.exitCode) process.exit(process.exitCode);
 }
 

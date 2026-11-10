@@ -109,7 +109,7 @@ export type SegmentBrowserPoolOptions<TPage extends { close: () => Promise<void>
 };
 
 export type SegmentBrowserPool<TPage extends { close: () => Promise<void> }> = {
-  withPage: <T>(work: (page: TPage) => Promise<T>) => Promise<T>;
+  withPage: <T>(work: (page: TPage) => Promise<T>, timeoutMs?: number) => Promise<T>;
   launchCount: () => number;
   hasBrowser: () => boolean;
 };
@@ -208,13 +208,13 @@ export function createSegmentBrowserPool<TPage extends { close: () => Promise<vo
     }
   };
 
-  const runWithPage = async <T>(work: (page: TPage) => Promise<T>): Promise<T> => {
+  const runWithPage = async <T>(work: (page: TPage) => Promise<T>, timeoutMs: number): Promise<T> => {
     let page: TPage | null = null;
     let recycle = false;
     try {
       const current = await acquire();
       page = await withTimeout(current.newPage(), pageTimeoutMs, 'segment page open timed out');
-      const result = await withTimeout(work(page), pageTimeoutMs, 'segment page operation timed out');
+      const result = await withTimeout(work(page), timeoutMs, 'segment page operation timed out');
       pagesUsed += 1;
       if (disconnected) recycle = true;
       return result;
@@ -232,12 +232,12 @@ export function createSegmentBrowserPool<TPage extends { close: () => Promise<vo
   };
 
   return {
-    withPage<T>(work: (page: TPage) => Promise<T>) {
+    withPage<T>(work: (page: TPage) => Promise<T>, timeoutMs = pageTimeoutMs) {
       clearIdleTimer();
       inUse += 1;
       const run = chain.then(async () => {
         try {
-          return await runWithPage(work);
+          return await runWithPage(work, timeoutMs);
         } finally {
           inUse -= 1;
           if (inUse === 0 && browser) scheduleIdleClose();

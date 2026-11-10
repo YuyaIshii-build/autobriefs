@@ -1,9 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
-
-import puppeteer from 'puppeteer';
-
+import { getRenderBrowserPool, THUMBNAIL_PAGE_TIMEOUT_MS } from '@/lib/slides/render-browser';
 import { getSupabaseAdmin } from '@/lib/supabase/admin';
 import { chooseTitlesFile } from '@/lib/youtube/upload';
 
@@ -263,37 +258,19 @@ export type ThumbnailRender = {
 };
 
 export async function renderThumbnailPng(html: string): Promise<ThumbnailRender> {
-  const userDataDir = await mkdtemp(path.join(tmpdir(), 'autobriefs-thumbnail-'));
-  const args = [
-    '--no-sandbox',
-    '--disable-setuid-sandbox',
-    '--disable-dev-shm-usage',
-    '--single-process',
-    '--no-zygote',
-    `--user-data-dir=${userDataDir}`,
-  ];
-  const browser = await puppeteer.launch({ headless: true, args }).catch((error: unknown) => {
-    const message = error instanceof Error ? error.message : '';
-    if (!message.includes('Could not find Chrome')) throw error;
-    return puppeteer.launch({ headless: true, channel: 'chrome', args });
-  });
-  try {
-    const page = await browser.newPage();
+  return getRenderBrowserPool().withPage(async (page) => {
     await page.setViewport({ width: THUMBNAIL_WIDTH, height: THUMBNAIL_HEIGHT, deviceScaleFactor: 1 });
     await page.setContent(html, { waitUntil: 'load' });
     await page.evaluate(() => document.fonts.ready);
     const measured = await page.evaluate(() => {
-      return (window as unknown as { measureThumbnail: () => ThumbnailRender }).measureThumbnail();
+      return (window as unknown as { measureThumbnail: () => Omit<ThumbnailRender, 'png'> }).measureThumbnail();
     });
     const png = await page.screenshot({
       type: 'png',
       clip: { x: 0, y: 0, width: THUMBNAIL_WIDTH, height: THUMBNAIL_HEIGHT },
     });
     return { ...measured, png };
-  } finally {
-    await browser.close();
-    await rm(userDataDir, { recursive: true, force: true });
-  }
+  }, THUMBNAIL_PAGE_TIMEOUT_MS);
 }
 
 export function readPngSize(png: Uint8Array): { width: number; height: number } | null {

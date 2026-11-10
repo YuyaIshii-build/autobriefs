@@ -2,6 +2,8 @@
 
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { exec } from 'child_process';
+import { createReadStream } from 'node:fs';
+import { Readable } from 'node:stream';
 import util from 'util';
 import path from 'path';
 import fs from 'fs/promises';
@@ -11,7 +13,41 @@ const execAsync = util.promisify(exec);
 
 const SUPABASE_URL = process.env.SUPABASE_URL!;
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+
+let supabase: ReturnType<typeof createClient> | null = null;
+
+function getStorage(): Mp4Uploader {
+  supabase ??= createClient(SUPABASE_URL, SUPABASE_KEY);
+  return supabase.storage;
+}
+
+type Mp4Uploader = {
+  from(bucket: string): {
+    upload(
+      objectPath: string,
+      body: ReadableStream<Uint8Array>,
+      options: {
+        cacheControl: string;
+        upsert: boolean;
+        contentType: string;
+        duplex: string;
+        headers: { 'content-length': string };
+      },
+    ): Promise<{ error: { message: string } | null }>;
+  };
+};
+
+export async function uploadMp4File(objectPath: string, filePath: string, storage: Mp4Uploader = getStorage()) {
+  const { size } = await fs.stat(filePath);
+  const body = Readable.toWeb(createReadStream(filePath)) as ReadableStream<Uint8Array>;
+  return storage.from('projects').upload(objectPath, body, {
+    cacheControl: '3600',
+    upsert: true,
+    contentType: 'video/mp4',
+    duplex: 'half',
+    headers: { 'content-length': String(size) },
+  });
+}
 
 function chunkArray<T>(arr: T[], size: number): T[][] {
   const res: T[][] = [];
@@ -156,12 +192,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     console.log(`✅ Final ffmpeg stderr:\n${finalStderr}`);
 
     console.log(`⬆️ Uploading final video to Supabase...`);
-    const videoBuffer = await fs.readFile(finalOutput);
-    const { error: uploadError } = await supabase.storage.from('projects').upload(`${videoId}/${videoId}.mp4`, videoBuffer, {
-      cacheControl: '3600',
-      upsert: true,
-      contentType: 'video/mp4',
-    });
+    const { error: uploadError } = await uploadMp4File(`${videoId}/${videoId}.mp4`, finalOutput);
 
     if (uploadError) return res.status(500).json({ error: 'Supabase upload failed', details: uploadError.message });
     console.log(`✅ Upload complete.`);

@@ -1,8 +1,9 @@
 // pages/api/render-topic-slide.ts
 
-import puppeteer from 'puppeteer';
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { createClient } from '@supabase/supabase-js';
+
+import { getRenderBrowserPool, TOPIC_PAGE_TIMEOUT_MS } from '@/lib/slides/render-browser';
 
 const SUPABASE_URL = process.env.SUPABASE_URL!;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
@@ -44,7 +45,7 @@ export default async function handler(
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
           console.log(`🔁 Topic slide rendering attempt ${attempt}`);
-          await renderTopicSlide(html, videoId, topicId, attempt);
+          await renderTopicSlide(html, videoId, topicId);
           console.log('✅ Topic slide rendering succeeded');
           break;
         } catch (error) {
@@ -73,58 +74,20 @@ export default async function handler(
   }
 }
 
-async function renderTopicSlide(
-  html: string,
-  videoId: string,
-  topicId: string,
-  attempt: number
-) {
-  // ⭐️ ここが核心：topicごと・attemptごとに完全分離
-  const userDataDir = `/tmp/puppeteer_topic_${videoId}_${topicId}_attempt_${attempt}`;
+async function renderTopicSlide(html: string, videoId: string, topicId: string) {
+  const imageBuffer = await getRenderBrowserPool().withPage(async (page) => {
+    await page.setViewport({ width: 1920, height: 1080 });
+    await page.setContent(html, { waitUntil: 'networkidle0' });
+    return page.screenshot({ type: 'png', omitBackground: true });
+  }, TOPIC_PAGE_TIMEOUT_MS);
 
-  const browser = await puppeteer.launch({
-    headless: true,
-    userDataDir,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--single-process',
-      '--no-zygote',
-    ],
+  const filePath = `${videoId}/topic/${topicId}.png`;
+  const { error: uploadError } = await supabase.storage.from('projects').upload(filePath, imageBuffer, {
+    contentType: 'image/png',
+    upsert: true,
+    cacheControl: '3600',
   });
 
-  try {
-    const page = await browser.newPage();
-    await page.setViewport({ width: 1920, height: 1080 });
-
-    await page.setContent(html, {
-      waitUntil: 'networkidle0',
-    });
-
-    const imageBuffer = await page.screenshot({
-      type: 'png',
-      omitBackground: true,
-    });
-
-    // --- 保存パス ---
-    // projects/{videoId}/topic/{topicId}.png
-    const filePath = `${videoId}/topic/${topicId}.png`;
-
-    const { error: uploadError } = await supabase.storage
-      .from('projects')
-      .upload(filePath, imageBuffer, {
-        contentType: 'image/png',
-        upsert: true,
-        cacheControl: '3600',
-      });
-
-    if (uploadError) {
-      throw new Error(`Upload failed: ${uploadError.message}`);
-    }
-
-    console.log('✅ Topic slide upload succeeded:', filePath);
-  } finally {
-    await browser.close();
-  }
+  if (uploadError) throw new Error(`Upload failed: ${uploadError.message}`);
+  console.log('✅ Topic slide upload succeeded:', filePath);
 }

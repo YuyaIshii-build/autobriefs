@@ -1,13 +1,10 @@
 // pages/api/render-slide.ts
 
-import { rm } from 'node:fs/promises';
-
 import { createClient } from '@supabase/supabase-js';
 import type { NextApiRequest, NextApiResponse } from 'next';
-import puppeteer from 'puppeteer';
 
+import { getRenderBrowserPool } from '@/lib/slides/render-browser';
 import {
-  createSegmentBrowserPool,
   formatSlideRenderStatus,
   getSegmentRenderQueue,
   runSegmentRenderAttempts,
@@ -75,43 +72,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   }
 }
 
-let browserGeneration = 0;
-
-function createPool() {
-  return createSegmentBrowserPool({
-    createUserDataDir() {
-      browserGeneration += 1;
-      return `/tmp/puppeteer_segment_${process.pid}_${browserGeneration}`;
-    },
-    removeDir: (dir) => rm(dir, { recursive: true, force: true }),
-    isBusy: () => {
-      const queue = getSegmentRenderQueue();
-      return queue.active > 0 || queue.waiting > 0;
-    },
-    launch: (userDataDir) =>
-      puppeteer.launch({
-        headless: true,
-        args: [
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage',
-          '--single-process',
-          '--no-zygote',
-          `--user-data-dir=${userDataDir}`,
-        ],
-      }),
-  });
-}
-
-let segmentBrowserPool: ReturnType<typeof createPool> | null = null;
-
-function getSegmentBrowser() {
-  segmentBrowserPool ??= createPool();
-  return segmentBrowserPool;
-}
-
 async function renderSlide(html: string, videoId: string, segmentId: string) {
-  const imageBuffer = await getSegmentBrowser().withPage(async (page) => {
+  const imageBuffer = await getRenderBrowserPool().withPage(async (page) => {
     await page.setViewport({ width: 1920, height: 1080 });
     await page.setContent(html, { waitUntil: 'networkidle0' });
     return page.screenshot({ type: 'png', omitBackground: true });
